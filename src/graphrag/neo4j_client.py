@@ -178,6 +178,23 @@ class Neo4jClient:
                 relationships.append({"from": r["from_entity"], "type": r["rel_type"], "to": r["to_entity"]})
 
         return {"entities": entities, "relationships": relationships}
+
+    def chunk_ids_with_entities(self, chunk_ids: List[str]) -> List[str]:
+        """
+        Return chunk_ids that have at least one linked Entity in the graph.
+        """
+        if not chunk_ids:
+            return []
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (c:ChunkRef)-[:MENTIONS]->(e)
+                WHERE c.chunk_id IN $chunk_ids AND 'Entity' IN labels(e)
+                RETURN DISTINCT c.chunk_id AS chunk_id
+                """,
+                chunk_ids=chunk_ids,
+            )
+            return [r["chunk_id"] for r in result]
     
     def create_chunk_node(
         self,

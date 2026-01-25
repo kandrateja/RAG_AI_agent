@@ -33,12 +33,16 @@ class VectorHit:
     text: str
     score: float
     source_path: Optional[str]
+    semantic_score: Optional[float] = None
+    keyword_score: Optional[float] = None
 
 
 class PostgresVectorStore:
     def __init__(self, dsn: str, embedding_dim: int):
         self.dsn = dsn
         self.embedding_dim = embedding_dim
+        self.keyword_weight = 0.3
+        self.semantic_weight = 0.7
 
     def _connect(self):
         return psycopg.connect(self.dsn, autocommit=True)
@@ -73,9 +77,23 @@ class PostgresVectorStore:
                 
                 cur.execute("CREATE INDEX IF NOT EXISTS chunks_doc_id_idx ON chunks(doc_id);")
                 
-                # Note: Index creation for > 2000 dimensions (like 3072) is disabled due to Postgres limits.
-                # Exact search (without index) will be used, which is accurate and fast for mid-sized datasets.
-                # cur.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);")
+                # Full-text index for keyword search
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS chunks_text_fts_idx "
+                    "ON chunks USING GIN (to_tsvector('english', text));"
+                )
+
+                # HNSW index is supported only for <= 2000 dimensions
+                if self.embedding_dim <= 2000:
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx "
+                        "ON chunks USING hnsw (embedding vector_cosine_ops);"
+                    )
+                else:
+                    logger.info(
+                        "Skipping HNSW index creation; embedding_dim=%s exceeds 2000",
+                        self.embedding_dim,
+                    )
 
     def upsert_document(self, doc_id: str, doc_hash: Optional[str], source_path: Optional[str]) -> None:
         with self._connect() as conn:
@@ -140,6 +158,7 @@ class PostgresVectorStore:
         self,
         query_embedding: Sequence[float],
         top_k: int = 5,
+        query_text: Optional[str] = None,
     ) -> List[VectorHit]:
         """
         Cosine distance in pgvector:
@@ -151,6 +170,17 @@ class PostgresVectorStore:
                 f"Query embedding dim mismatch: expected {self.embedding_dim}, got {len(query_embedding)}"
             )
 
+        semantic_rows = self._semantic_search(query_embedding, top_k=top_k * 2)
+        if query_text:
+            keyword_rows = self._keyword_search(query_text, top_k=top_k * 2)
+            return self._merge_semantic_keyword(semantic_rows, keyword_rows, top_k=top_k)
+        return self._rows_to_hits(semantic_rows)
+
+    def _semantic_search(
+        self,
+        query_embedding: Sequence[float],
+        top_k: int,
+    ) -> List[tuple]:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -165,8 +195,71 @@ class PostgresVectorStore:
                     """,
                     (list(query_embedding), list(query_embedding), top_k),
                 )
-                rows = cur.fetchall() or []
+                return cur.fetchall() or []
 
+    def _keyword_search(self, query_text: str, top_k: int) -> List[tuple]:
+        if not query_text.strip():
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.chunk_id, c.doc_id, c.page_number, c.text,
+                           ts_rank_cd(
+                             to_tsvector('english', c.text),
+                             plainto_tsquery('english', %s)
+                           ) AS kw_score,
+                           d.source_path
+                    FROM chunks c
+                    JOIN documents d ON c.doc_id = d.doc_id
+                    WHERE to_tsvector('english', c.text) @@ plainto_tsquery('english', %s)
+                    ORDER BY kw_score DESC
+                    LIMIT %s
+                    """,
+                    (query_text, query_text, top_k),
+                )
+                return cur.fetchall() or []
+
+    def _merge_semantic_keyword(
+        self,
+        semantic_rows: List[tuple],
+        keyword_rows: List[tuple],
+        top_k: int,
+    ) -> List[VectorHit]:
+        semantic_map: Dict[str, tuple] = {r[0]: r for r in semantic_rows}
+        keyword_map: Dict[str, tuple] = {r[0]: r for r in keyword_rows}
+        max_kw = max([float(r[4]) for r in keyword_rows], default=0.0)
+        if max_kw <= 0.0:
+            max_kw = 1.0
+
+        combined: List[tuple] = []
+        for chunk_id in set(semantic_map.keys()) | set(keyword_map.keys()):
+            sem_row = semantic_map.get(chunk_id)
+            kw_row = keyword_map.get(chunk_id)
+            base_row = sem_row or kw_row
+            sem_score = float(sem_row[4]) if sem_row else 0.0
+            kw_score = float(kw_row[4]) if kw_row else 0.0
+            kw_norm = kw_score / max_kw
+            combined_score = (sem_score * self.semantic_weight) + (kw_norm * self.keyword_weight)
+            combined.append((base_row, combined_score, sem_score, kw_norm))
+
+        combined.sort(key=lambda x: x[1], reverse=True)
+        return [
+            VectorHit(
+                chunk_id=row[0],
+                doc_id=row[1],
+                doc_name=os.path.basename(row[5]) if row[5] else None,
+                page_number=row[2],
+                text=row[3],
+                score=float(score),
+                source_path=row[5],
+                semantic_score=float(sem_score),
+                keyword_score=float(kw_norm),
+            )
+            for row, score, sem_score, kw_norm in combined[:top_k]
+        ]
+
+    def _rows_to_hits(self, rows: List[tuple]) -> List[VectorHit]:
         return [
             VectorHit(
                 chunk_id=r[0],
@@ -176,6 +269,8 @@ class PostgresVectorStore:
                 text=r[3],
                 score=float(r[4]),
                 source_path=r[5],
+                semantic_score=float(r[4]),
+                keyword_score=None,
             )
             for r in rows
         ]

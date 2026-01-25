@@ -10,7 +10,7 @@ A comprehensive Retrieval-Augmented Generation (RAG) AI agent that combines Azur
 
 - **Azure Document Intelligence**: OCR and document extraction from scanned PDFs (non-text, image-based)
 - **Azure OpenAI**: 
-  - Text embeddings using `text-embedding-3-large` 
+  - Text embeddings using `text-embedding-3-small` (1536 dims, HNSW compatible) 
   - LLM chat completions using Azure OpenAI deployments
   - Entity + relationship extraction (LLM-assisted) to populate the graph
 - **Vector DB (Postgres + pgvector)**:
@@ -66,7 +66,7 @@ RAG_AI_agent/
    - Azure Document Intelligence resource
    - Azure OpenAI resource with:
      - Chat completion model deployment (e.g., GPT-4, GPT-3.5)
-     - Embedding model deployment (`text-embedding-3-large` or `text-embedding-3`)
+     - Embedding model deployment (`text-embedding-3-small` recommended for HNSW)
 
 2. **Docker** (for Postgres + Neo4j containers)
 
@@ -107,7 +107,7 @@ AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-openai-api-key
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
 AZURE_OPENAI_DEPLOYMENT_NAME=your-deployment-name
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
 
 # Neo4j
 NEO4J_URI=bolt://localhost:7687
@@ -239,6 +239,8 @@ agent.close()
 ### Query Flow
 
 1. **Vector Retrieval (pgvector)**: Compute similarity and get top-k chunks.
+   - Hybrid ranking uses **semantic + keyword** scores.
+   - Keyword search uses Postgres full-text search; scores are normalized and blended with cosine similarity.
 2. **Routing by thresholds**:
    - `vector_best_score >= 0.7` → vector-only
    - `0.3 <= vector_best_score < 0.7` → vector + graph
@@ -274,8 +276,7 @@ Edit `config.py` or set environment variables to customize:
 
 ### Embedding Generator (`src/embeddings/embedding_generator.py`)
 - Uses Azure OpenAI embedding models
-- Supports `text-embedding-3-large` (3072 dimensions)
-- Supports `text-embedding-3` (1536 dimensions)
+- Supports `text-embedding-3-small` (1536 dimensions)
 - Batch processing support
 
 ### Neo4j Client (`src/graphrag/neo4j_client.py`)
@@ -364,7 +365,8 @@ This system meets all the functional requirements:
 ### Vector Search Performance
 
 For better performance with large datasets:
-- Consider approximate indexes in a vector DB
+- HNSW is enabled automatically when embedding dimensions are <= 2000
+- Use `text-embedding-3-small` (1536 dims) to allow HNSW in pgvector
 - Adjust `top_k` and similarity thresholds
 
 

@@ -2,6 +2,7 @@
 Main RAG AI Agent Orchestrator
 """
 import logging
+import re
 import json
 import hashlib
 from typing import List, Dict, Optional
@@ -98,7 +99,12 @@ class RAGAgent:
             logger.warning(f"Could not compute document hash: {e}")
             return ""
     
-    def ingest_document(self, document_path: str, doc_id: Optional[str] = None) -> Dict:
+    def ingest_document(
+        self,
+        document_path: str,
+        doc_id: Optional[str] = None,
+        source_name: Optional[str] = None,
+    ) -> Dict:
         """
         Ingest a document: OCR -> Chunk -> Embed -> Store in Neo4j
         
@@ -206,7 +212,8 @@ class RAGAgent:
             #         + create ChunkRef nodes in Neo4j to enable graph-time expansion
             logger.info("[INGEST] Storing document/chunks in Postgres (pgvector) + chunk refs in Neo4j")
             try:
-                self.vector_store.upsert_document(doc_id=doc_id, doc_hash=doc_hash, source_path=document_path)
+                source_path = source_name or document_path
+                self.vector_store.upsert_document(doc_id=doc_id, doc_hash=doc_hash, source_path=source_path)
                 
                 stored_chunks = []
                 for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
@@ -456,7 +463,9 @@ class RAGAgent:
                 "doc_id": chunk.get("doc_id", "unknown"),
                 "doc_name": chunk.get("doc_name"),
                 "page_number": chunk.get("page_number"),
-                "similarity": chunk.get("similarity")
+                "similarity": chunk.get("similarity"),
+                "semantic_score": chunk.get("semantic_score"),
+                "keyword_score": chunk.get("keyword_score"),
             }
             citations.append(citation)
         return citations
@@ -478,9 +487,29 @@ class RAGAgent:
         try:
             vector_high_threshold = 0.7
             vector_low_threshold = 0.3
-            small_talk = question.strip().lower() in {
+            question_lower = question.strip().lower()
+            question_norm = re.sub(r"[^a-z0-9\s]", " ", question_lower)
+            question_norm = re.sub(r"\s+", " ", question_norm).strip()
+            small_talk = question_lower in {
                 "hi", "hello", "hey", "hey!", "hi!", "hello!", "hola", "good morning", "good evening"
             }
+            history_intent_phrases = [
+                "what are the questions i asked",
+                "questions i asked so far",
+                "what did i ask",
+                "what have i asked",
+                "conversation history",
+                "chat history",
+                "previous questions",
+                "questions so far",
+            ]
+            history_intent = any(p in question_norm for p in history_intent_phrases)
+            if not history_intent:
+                history_intent = (
+                    "question" in question_norm
+                    and "ask" in question_norm
+                    and ("so far" in question_norm or "history" in question_norm)
+                )
             vector_tool = {
                 "type": "function",
                 "function": {
@@ -491,6 +520,7 @@ class RAGAgent:
                         "properties": {
                             "query": {"type": "string"},
                             "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                            "initial_k": {"type": "integer", "minimum": 1, "maximum": 50},
                         },
                         "required": ["query"],
                     },
@@ -560,9 +590,12 @@ class RAGAgent:
                 nonlocal chunks, vector_sufficient, vector_best_score
                 query_text = args.get("query") or question
                 k = int(args.get("top_k") or top_k)
+                initial_k = int(args.get("initial_k") or max(k, k * 2))
                 logger.info("[QUERY] Tool: vector_search")
                 query_embedding = self.embedding_generator.generate_embedding(query_text)
-                hits: List[VectorHit] = self.vector_store.similarity_search(query_embedding, top_k=k)
+                hits: List[VectorHit] = self.vector_store.similarity_search(
+                    query_embedding, top_k=initial_k, query_text=query_text
+                )
                 results = [
                     {
                         "chunk_id": h.chunk_id,
@@ -571,10 +604,37 @@ class RAGAgent:
                         "page_number": h.page_number,
                         "content": h.text,
                         "similarity": h.score,
+                        "semantic_score": h.semantic_score,
+                        "keyword_score": h.keyword_score,
                         "source_path": h.source_path,
+                        "rerank_score": None,
                     }
                     for h in hits
                 ]
+
+                # Graph boost: mark chunks linked to entities in Neo4j
+                graph_chunk_ids = set()
+                if self.neo4j_client is not None and results:
+                    try:
+                        seed_chunk_ids = [c["chunk_id"] for c in results]
+                        graph_chunk_ids = set(self.neo4j_client.chunk_ids_with_entities(seed_chunk_ids))
+                    except Exception:
+                        graph_chunk_ids = set()
+
+                # Re-ranking: combine hybrid similarity, keyword overlap, and graph boost
+                query_tokens = set(re.findall(r"[a-z0-9]+", query_text.lower()))
+                for item in results:
+                    chunk_tokens = set(re.findall(r"[a-z0-9]+", (item.get("content") or "").lower()))
+                    overlap = 0.0
+                    if query_tokens:
+                        overlap = len(query_tokens & chunk_tokens) / len(query_tokens)
+                    similarity = item.get("similarity") or 0.0
+                    graph_boost = 1.0 if item.get("chunk_id") in graph_chunk_ids else 0.0
+                    item["rerank_score"] = (0.6 * similarity) + (0.25 * overlap) + (0.15 * graph_boost)
+
+                results.sort(key=lambda x: x.get("rerank_score") or 0.0, reverse=True)
+                results = results[:k]
+
                 vector_best_score = max([c["similarity"] for c in results if c.get("similarity") is not None], default=None)
                 chunks = results
                 vector_sufficient = vector_best_score is not None and vector_best_score >= vector_high_threshold
@@ -621,8 +681,8 @@ class RAGAgent:
                 "Only call graph_expand if vector_search results are insufficient. "
                 "Only call web_search if internal knowledge (vector + graph) is insufficient. "
                 "After tools return, answer the question using the tool outputs. "
-                "Always include citations for internal KB content using doc_id, page_number, and chunk_id. "
-                "State whether the answer used internal knowledge, web, or both. "
+                "Do NOT include inline citations, doc_ids, chunk_ids, page numbers, or source notes in the answer body. "
+                "The UI will display citations separately. Focus only on the answer. "
                 "If vector_search returns no relevant chunks, do not claim internal knowledge. "
                 "If insufficient info, say so explicitly without guessing."
             )
@@ -636,7 +696,44 @@ class RAGAgent:
                         messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": question})
 
-            # Small-talk shortcut: direct response, no tools.
+            # History or small-talk shortcut: direct response, no tools.
+            if history_intent:
+                tools_used["direct"] = True
+                direct_messages: List[Dict] = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful assistant. Answer using only the conversation history provided. "
+                            "Do not use tools or external sources."
+                        ),
+                    }
+                ]
+                if history:
+                    for msg in history:
+                        role = msg.get("role")
+                        content = msg.get("content")
+                        if role in {"user", "assistant"} and content:
+                            direct_messages.append({"role": role, "content": content})
+                direct_messages.append({"role": "user", "content": question})
+                answer = self.llm_client.chat_completion(direct_messages)
+                return {
+                    "question": question,
+                    "answer": answer,
+                    "retrieved_chunks": [],
+                    "citations": [],
+                    "entities": [],
+                    "relationships": [],
+                    "web_results": [],
+                    "web_citations": [],
+                    "context_used": "",
+                    "provenance": "none",
+                    "tools_used": tools_used,
+                    "tools_satisfied": {"vector": False, "graph": False, "web": False, "direct": True},
+                    "sources_used": {"vector": False, "graph": False, "web": False, "direct": True},
+                    "has_internal_knowledge": False,
+                    "internal_sufficient": False,
+                    "decision_trace": {"reason": "conversation_history"},
+                }
             if small_talk:
                 tools_used["direct"] = True
                 answer = self.llm_client.chat_completion(messages)
@@ -791,6 +888,8 @@ class RAGAgent:
                 "vector_high_threshold": vector_high_threshold,
                 "vector_low_threshold": vector_low_threshold,
                 "vector_best_score": vector_best_score,
+                "vector_initial_k": int(max(top_k, top_k * 2)),
+                "vector_final_k": top_k,
                 "vector_sufficient": vector_sufficient,
                 "graph_sufficient": graph_sufficient,
                 "graph_confidence": graph_confidence,

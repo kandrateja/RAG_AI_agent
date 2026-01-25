@@ -17,7 +17,7 @@ class EmbeddingGenerator:
         endpoint: str,
         api_key: str,
         api_version: str,
-        deployment_name: str = "text-embedding-3-large"
+        deployment_name: str = "text-embedding-3-small"
     ):
         """
         Initialize Azure OpenAI client for embeddings
@@ -89,7 +89,7 @@ class EmbeddingGenerator:
             Embedding dimension size
         """
         # text-embedding-3-large: 3072 dimensions
-        # text-embedding-3: 1536 dimensions
+        # text-embedding-3-small: 1536 dimensions
         if "large" in self.deployment_name.lower():
             return 3072
         else:

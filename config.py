@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     azure_openai_api_key: str
     azure_openai_api_version: str = "2024-02-15-preview"
     azure_openai_deployment_name: str
-    azure_openai_embedding_deployment_name: str = "text-embedding-3-large"
+    azure_openai_embedding_deployment_name: str = "text-embedding-3-small"
     
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"

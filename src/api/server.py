@@ -43,6 +43,8 @@ class Citation(BaseModel):
     doc_name: Optional[str] = None
     page_number: Optional[int] = None
     similarity: Optional[float] = None
+    semantic_score: Optional[float] = None
+    keyword_score: Optional[float] = None
 
 
 class WebCitation(BaseModel):
@@ -165,7 +167,7 @@ async def ingest_document(
 
     try:
         logger.info(f"Ingesting document: {file.filename}")
-        result = agent.ingest_document(tmp_path, doc_id=doc_id)
+        result = agent.ingest_document(tmp_path, doc_id=doc_id, source_name=file.filename)
         
         status = result.get("status", "unknown")
         
@@ -242,7 +244,9 @@ def query_rag(request: QueryRequest) -> QueryResponse:
                 doc_id=cit.get("doc_id", "unknown"),
                 doc_name=cit.get("doc_name"),
                 page_number=cit.get("page_number"),
-                similarity=cit.get("similarity")
+                similarity=cit.get("similarity"),
+                semantic_score=cit.get("semantic_score"),
+                keyword_score=cit.get("keyword_score"),
             ))
 
         return QueryResponse(

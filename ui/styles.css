@@ -17,7 +17,7 @@
 * { box-sizing: border-box; }
 body { margin: 0; font-family: Arial, sans-serif; color: var(--text); background: var(--bg); }
 
-.app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; width: 100vw; background: #ffffff; }
+.app { display: grid; grid-template-columns: 240px minmax(0, 1fr); height: 100vh; width: 100vw; background: #ffffff; overflow: hidden; }
 
 .sidebar {
   background: var(--sidebar);
@@ -26,6 +26,8 @@ body { margin: 0; font-family: Arial, sans-serif; color: var(--text); background
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100vh;
+  overflow: auto;
 }
 .brand { font-weight: 700; font-size: 16px; }
 .new-chat {
@@ -44,8 +46,8 @@ body { margin: 0; font-family: Arial, sans-serif; color: var(--text); background
 .sidebar-muted { font-size: 12px; color: #cbd5e1; margin: 6px 0; }
 .sidebar details { background: #0b1220; border: 1px solid #1f2937; border-radius: 10px; padding: 8px; color: #e2e8f0; }
 
-.main { display: flex; flex-direction: column; padding: 0; min-width: 0; width: 100%; }
-.chat-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 16px; }
+.main { display: flex; flex-direction: column; padding: 0; min-width: 0; width: 100%; height: 100vh; overflow: hidden; }
+.chat-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 16px; flex-shrink: 0; }
 .title { font-weight: 700; }
 .muted { color: var(--muted); font-size: 12px; }
 .status { font-size: 13px; }
@@ -74,6 +76,13 @@ body { margin: 0; font-family: Arial, sans-serif; color: var(--text); background
   border-top: 1px dashed var(--border); padding-top: 8px;
 }
 .meta .tool-badges { margin-top: 6px; }
+.meta-section { margin-top: 8px; }
+.meta-title { font-weight: 600; color: #334155; margin-bottom: 6px; }
+.meta-subtitle { font-weight: 600; color: #475569; margin: 6px 0; }
+.meta-list { margin: 0; padding-left: 16px; display: grid; gap: 6px; }
+.meta-list li { list-style: disc; }
+.meta-snippet { color: #64748b; margin-top: 4px; }
+.meta-line { margin-top: 2px; }
 
 .composer {
   margin-top: 0;
@@ -85,6 +94,10 @@ body { margin: 0; font-family: Arial, sans-serif; color: var(--text); background
   flex-direction: column;
   gap: 10px;
   width: 100%;
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
 }
 textarea {
   width: 100%;

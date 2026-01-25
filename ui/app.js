@@ -64,15 +64,45 @@ function appendMessage(role, text, meta) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   const content = document.createElement("div");
-  content.innerHTML = role === "assistant" ? renderMarkdown(text || "") : escapeHtml(text || "");
+  const cleanedText = role === "assistant" ? stripInlineCitations(text || "") : text || "";
+  content.innerHTML = role === "assistant" ? renderMarkdown(cleanedText) : escapeHtml(cleanedText);
   bubble.appendChild(roleEl);
   bubble.appendChild(content);
 
   if (meta && role === "assistant") {
     const metaEl = document.createElement("div");
     metaEl.className = "meta";
-    const tools = document.createElement("div");
-    tools.textContent = "Sources used:";
+    const section = (title) => {
+      const wrap = document.createElement("div");
+      wrap.className = "meta-section";
+      const label = document.createElement("div");
+      label.className = "meta-title";
+      label.textContent = title;
+      wrap.appendChild(label);
+      return { wrap, label };
+    };
+
+    // Knowledge source used
+    const knowledgeSection = section("Knowledge source used");
+    const provenance = meta.provenance || "";
+    let provenanceLabel = "none";
+    if (provenance) {
+      provenanceLabel = provenance;
+    } else {
+      const hasInternal = !!meta.sources_used?.vector || !!meta.sources_used?.graph;
+      const hasWeb = !!meta.sources_used?.web;
+      if (hasInternal && hasWeb) provenanceLabel = "both";
+      else if (hasInternal) provenanceLabel = "internal";
+      else if (hasWeb) provenanceLabel = "online";
+    }
+    const provenanceLine = document.createElement("div");
+    provenanceLine.className = "meta-line";
+    provenanceLine.textContent = `Knowledge source used: ${provenanceLabel}`;
+    knowledgeSection.wrap.appendChild(provenanceLine);
+    metaEl.appendChild(knowledgeSection.wrap);
+
+    // Sources used
+    const sourcesSection = section("Sources used");
     const badges = document.createElement("div");
     badges.className = "tool-badges";
     ["vector", "graph", "web", "direct"].forEach((key) => {
@@ -82,53 +112,82 @@ function appendMessage(role, text, meta) {
       span.textContent = used ? `${key} ✓` : `${key} ✕`;
       badges.appendChild(span);
     });
+    sourcesSection.wrap.appendChild(badges);
+    metaEl.appendChild(sourcesSection.wrap);
 
-    const sources = document.createElement("div");
-    sources.style.marginTop = "6px";
-    sources.textContent = "Internal citations:";
-    const ul = document.createElement("ul");
-    (meta.citations || []).forEach((c) => {
-      const li = document.createElement("li");
-      const name = c.doc_name || c.doc_id || "Unknown";
-      const docLine = document.createElement("div");
-      docLine.textContent = `Document: ${name}`;
-      const pageLine = document.createElement("div");
-      pageLine.textContent = `Page: ${c.page_number ?? "?"}`;
-      const chunkLine = document.createElement("div");
-      chunkLine.textContent = `Chunk: ${c.chunk_id}`;
-      li.appendChild(docLine);
-      li.appendChild(pageLine);
-      li.appendChild(chunkLine);
-      ul.appendChild(li);
-    });
+    // Citations (internal + web)
+    const citationsSection = section("Citations");
+    const internalCitations = meta.citations || [];
+    const webCitations = meta.web_citations || [];
+    if (internalCitations.length || webCitations.length) {
+      const ul = document.createElement("ul");
+      ul.className = "meta-list";
+      if (internalCitations.length) {
+        const internalLabel = document.createElement("div");
+        internalLabel.className = "meta-subtitle";
+        internalLabel.textContent = "Internal citations";
+        citationsSection.wrap.appendChild(internalLabel);
+        internalCitations.forEach((c) => {
+          const li = document.createElement("li");
+          const fallback = (meta.retrieved_chunks || []).find(
+            (rc) => rc.chunk_id === c.chunk_id
+          );
+          const name = c.doc_name || c.doc_id || "Unknown";
+          const docLine = document.createElement("div");
+          docLine.className = "meta-line";
+          docLine.textContent = `Document: ${name}`;
+          const pageLine = document.createElement("div");
+          pageLine.className = "meta-line";
+          pageLine.textContent = `Page: ${c.page_number ?? "?"}`;
+          const chunkLine = document.createElement("div");
+          chunkLine.className = "meta-line";
+          chunkLine.textContent = `Chunk: ${c.chunk_id}`;
+          const combined = c.similarity;
+          if (combined !== null && combined !== undefined) {
+            const scoreLine = document.createElement("div");
+            scoreLine.className = "meta-line";
+            scoreLine.textContent =
+              `Hybrid score: ${combined.toFixed(3)} (semantic + keyword)`;
+            li.appendChild(scoreLine);
+          }
+          li.appendChild(docLine);
+          li.appendChild(pageLine);
+          li.appendChild(chunkLine);
+          ul.appendChild(li);
+        });
+      }
 
-    const webSources = document.createElement("div");
-    webSources.style.marginTop = "6px";
-    webSources.textContent = "Web citations:";
-    const ulWeb = document.createElement("ul");
-    (meta.web_citations || []).forEach((c) => {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = c.url || "#";
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = c.title || c.url || c.web_id;
-      li.appendChild(a);
-      ulWeb.appendChild(li);
-    });
+      if (webCitations.length) {
+        const webLabel = document.createElement("div");
+        webLabel.className = "meta-subtitle";
+        webLabel.textContent = "Web citations";
+        citationsSection.wrap.appendChild(webLabel);
+        webCitations.forEach((c) => {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.href = c.url || "#";
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.textContent = c.title || c.url || c.web_id;
+          li.appendChild(a);
+          if (c.snippet) {
+            const snippet = document.createElement("div");
+            snippet.className = "meta-snippet";
+            snippet.textContent = c.snippet;
+            li.appendChild(snippet);
+          }
+          ul.appendChild(li);
+        });
+      }
 
-    metaEl.appendChild(tools);
-    metaEl.appendChild(badges);
-    metaEl.appendChild(sources);
-    metaEl.appendChild(ul);
-    metaEl.appendChild(webSources);
-    metaEl.appendChild(ulWeb);
+      citationsSection.wrap.appendChild(ul);
+      metaEl.appendChild(citationsSection.wrap);
+    }
 
     const trace = meta.decision_trace || {};
-    const traceBlock = document.createElement("div");
-    traceBlock.style.marginTop = "6px";
-    traceBlock.textContent = "Decision trace (thresholds & signals):";
+    const traceSection = section("Decision trace (thresholds & signals)");
     const ulTrace = document.createElement("ul");
+    ulTrace.className = "meta-list";
     const addTrace = (label, value) => {
       const li = document.createElement("li");
       const rendered =
@@ -155,14 +214,39 @@ function appendMessage(role, text, meta) {
     addTrace("graph_triggered", trace.graph_triggered);
     addTrace("web_triggered", trace.web_triggered);
     addTrace("web_trigger_reason", trace.web_trigger_reason);
-    metaEl.appendChild(traceBlock);
-    metaEl.appendChild(ulTrace);
+    traceSection.wrap.appendChild(ulTrace);
+    metaEl.appendChild(traceSection.wrap);
     bubble.appendChild(metaEl);
   }
 
   wrapper.appendChild(bubble);
   chat.appendChild(wrapper);
   chat.scrollTop = chat.scrollHeight;
+}
+
+function stripInlineCitations(text) {
+  if (!text) return "";
+  const lines = text.split("\n");
+  const output = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+    const startsCitation =
+      trimmed.startsWith("citations") ||
+      trimmed.startsWith("sources used") ||
+      trimmed.startsWith("source:") ||
+      trimmed.startsWith("source usage") ||
+      trimmed.startsWith("knowledge source") ||
+      trimmed.startsWith("internal citations") ||
+      trimmed.startsWith("web citations") ||
+      trimmed.startsWith("decision trace");
+    if (startsCitation) {
+      skipping = true;
+      break;
+    }
+    if (!skipping) output.push(line);
+  }
+  return output.join("\n").trim();
 }
 
 function escapeHtml(text) {
@@ -310,7 +394,9 @@ async function query() {
       sources_used: data.sources_used,
       citations: data.citations || [],
       web_citations: data.web_citations || [],
-      decision_trace: data.decision_trace || {}
+      decision_trace: data.decision_trace || {},
+      retrieved_chunks: data.retrieved_chunks || [],
+      provenance: data.provenance
     });
     if (convo) {
       convo.messages.push({
@@ -320,7 +406,9 @@ async function query() {
           sources_used: data.sources_used,
           citations: data.citations || [],
           web_citations: data.web_citations || [],
-          decision_trace: data.decision_trace || {}
+          decision_trace: data.decision_trace || {},
+          retrieved_chunks: data.retrieved_chunks || [],
+          provenance: data.provenance
         }
       });
     }
