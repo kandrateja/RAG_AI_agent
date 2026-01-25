@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAG AI Agent</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">RAG AI Agent</div>
+        <button class="new-chat" onclick="newConversation()">+ New chat</button>
+        <div class="sidebar-section">
+          <div class="sidebar-title">Recent</div>
+          <div id="memoryList"></div>
+        </div>
+        <div class="sidebar-section">
+          <details>
+            <summary>Ingestion</summary>
+            <div class="sidebar-muted">Add PDFs to the knowledge base.</div>
+            <div class="field">
+              <label for="pdfFile">PDF file</label>
+              <input type="file" id="pdfFile" accept=".pdf" />
+            </div>
+            <div class="field">
+              <label for="docId">Optional doc_id</label>
+              <input type="text" id="docId" placeholder="leave blank to auto-generate" />
+            </div>
+            <div class="actions">
+              <button class="btn" id="ingestBtn" onclick="ingest()">Ingest</button>
+              <button class="btn secondary" onclick="clearIngest()">Clear</button>
+            </div>
+            <div class="status" id="ingestStatus"></div>
+            <details class="sub-details">
+              <summary>Ingestion result</summary>
+              <pre id="ingestResult"></pre>
+            </details>
+          </details>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="chat-header">
+          <div>
+            <div class="title">Chat</div>
+            <div class="muted">Ask about internal docs or general knowledge.</div>
+          </div>
+          <div class="status" id="queryStatus"></div>
+        </div>
+
+        <div class="chat-log" id="chatLog"></div>
+
+        <div class="composer">
+          <div class="input-wrap">
+            <textarea id="question" placeholder="Message RAG AI Agent..."></textarea>
+            <button class="btn send-btn" id="queryBtn" onclick="query()">Send</button>
+          </div>
+          <div class="composer-actions">
+            <div class="toggles">
+              <label>Top K <input type="number" id="topK" value="5" min="1" max="20" /></label>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
