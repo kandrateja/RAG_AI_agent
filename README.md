@@ -74,11 +74,62 @@ RAG_AI_agent/
      - Chat completion model deployment (e.g., GPT-4o)
      - Embedding model deployment (`text-embedding-3-small` recommended for HNSW)
 
-2. **Docker** (for Postgres + Neo4j containers)
+2. **Docker** and **Docker Compose** (for running databases and optionally the entire system)
 
-3. **Python 3.9+**
+3. **Python 3.9+** (if running the app locally instead of in Docker)
 
-## Installation
+## Quick Start with Docker Compose (Recommended)
+
+The easiest way to run the entire system:
+
+1. **Clone the repository**:
+```bash
+git clone <repository-url>
+cd RAG_AI_agent
+```
+
+2. **Set up environment variables**:
+```bash
+cp .env.example .env
+# Edit .env and fill in your Azure credentials
+```
+
+3. **Update database connection strings in .env** (for Docker Compose):
+```env
+POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/rag
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_PASSWORD=rag-neo4j-password-2024
+```
+
+**Important**: The Docker Compose file sets Neo4j password to `rag-neo4j-password-2024`. Make sure your `.env` file matches this, or update `docker-compose.yml` with your preferred password.
+
+4. **Start everything with Docker Compose**:
+```bash
+docker-compose up -d
+```
+
+This starts:
+- PostgreSQL with pgvector (port 5432)
+- Neo4j (ports 7474, 7687)
+- RAG API server (port 8000)
+
+5. **Access the UI**: Open `http://localhost:8000/`
+
+6. **Stop everything**:
+```bash
+docker-compose down
+```
+
+**Note**: For local development, you can run only databases with Docker and run the Python app locally:
+```bash
+# Start only databases
+docker-compose -f docker-compose.dev.yml up -d
+
+# Then run Python app locally
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
+```
+
+## Manual Installation (Alternative)
 
 1. **Clone the repository**:
 ```bash
@@ -131,6 +182,15 @@ SURF_MAX_RESULTS=5
 ```
 
 ## Usage
+
+### Option 1: Docker Compose (Recommended)
+
+If you used Docker Compose, everything is already running:
+- UI: `http://localhost:8000/`
+- API: `http://localhost:8000/api/...`
+- Neo4j Browser: `http://localhost:7474/`
+
+### Option 2: Manual Setup
 
 ### Recommended: UI
 

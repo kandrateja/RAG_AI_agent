@@ -6,8 +6,8 @@ This guide walks you through setting up and testing the RAG AI Agent system from
 
 Before starting, ensure you have:
 
-- [ ] **Python 3.9+** installed
-- [ ] **Docker** (for Postgres + Neo4j containers)
+- [ ] **Docker** and **Docker Compose** installed
+- [ ] **Python 3.9+** installed (if running app locally instead of in Docker)
 - [ ] **Azure Account** with:
   - Azure Document Intelligence resource
   - Azure OpenAI resource with deployments for:
@@ -17,6 +17,58 @@ Before starting, ensure you have:
 - [ ] At least one **scanned PDF document** to test with
 
 ---
+
+## Quick Start: Docker Compose (Recommended)
+
+**Fastest way to get everything running:**
+
+1. **Clone and navigate to project**:
+```bash
+cd /Users/tejakandra/Downloads/AI-project-app/RAG_AI_agent
+```
+
+2. **Set up environment variables**:
+```bash
+cp .env.example .env
+# Edit .env with your Azure credentials
+```
+
+3. **Update database connections in .env for Docker**:
+```env
+POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/rag
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_PASSWORD=rag-neo4j-password-2024
+```
+
+4. **Start all services**:
+```bash
+docker-compose up -d
+```
+
+5. **Access the system**:
+- UI: `http://localhost:8000/`
+- API: `http://localhost:8000/docs`
+- Neo4j Browser: `http://localhost:7474/` (login: neo4j / rag-neo4j-password-2024)
+
+6. **Stop services**:
+```bash
+docker-compose down
+```
+
+**Note**: This starts Postgres, Neo4j, and the API server. For local development, you can run only databases with Docker:
+```bash
+# Start only databases
+docker-compose -f docker-compose.dev.yml up -d
+
+# Then run Python app locally (see Step 5 below)
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
+```
+
+---
+
+## Manual Setup (Alternative)
+
+If you prefer to run databases and Python app separately:
 
 ## Step 1: Database Setup
 
