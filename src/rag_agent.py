@@ -5,6 +5,7 @@ import logging
 import re
 import json
 import hashlib
+import base64
 from typing import List, Dict, Optional
 import uuid
 
@@ -175,9 +176,44 @@ class RAGAgent:
                 entities = []
                 relationships = []
             
-            # Step 3: Chunk the text with page information
+            # Step 3: Optional vision captions per page (diagram understanding)
+            page_captions: Dict[int, str] = {}
+            try:
+                logger.info("[INGEST] Extracting page images for vision captions")
+                page_images = self.ocr_processor.extract_page_images(document_path)
+                logger.info(f"[INGEST] Found {len(page_images)} page images")
+                for page in page_images:
+                    page_number = page.get("page_number")
+                    image_bytes = page.get("image_bytes")
+                    if not image_bytes:
+                        continue
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    caption = self.llm_client.chat_completion_with_image(
+                        prompt=(
+                            "Describe the diagram or visual content on this page. "
+                            "If there is no meaningful diagram, respond with 'No diagram detected.'"
+                        ),
+                        image_base64=image_b64,
+                        max_completion_tokens=256,
+                    )
+                    if caption and "no diagram detected" not in caption.lower():
+                        page_captions[int(page_number or 0)] = caption.strip()
+                if page_captions:
+                    logger.info(f"[INGEST] Generated {len(page_captions)} image captions")
+            except Exception as e:
+                logger.warning(f"[INGEST] Vision captioning skipped: {str(e)}")
+
+            # Step 4: Chunk the text with page information
             logger.info("[INGEST] Chunking document text")
             if pages:
+                # Merge page-level captions into page text to keep context aligned
+                if page_captions:
+                    for page in pages:
+                        page_number = int(page.get("page_number", 0) or 0)
+                        caption = page_captions.get(page_number)
+                        if caption:
+                            page_text = page.get("text", "")
+                            page["text"] = f"{page_text}\n\nImage caption: {caption}"
                 chunks = self.text_chunker.chunk_text_by_pages(
                     pages,
                     metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash}
@@ -193,7 +229,7 @@ class RAGAgent:
             
             logger.info(f"[INGEST] Created {len(chunks)} chunks")
             
-            # Step 4: Generate embeddings for chunks
+            # Step 5: Generate embeddings for chunks
             logger.info(f"[INGEST] Generating embeddings for {len(chunks)} chunks")
             try:
                 chunk_texts = [chunk["content"] for chunk in chunks]
@@ -684,7 +720,11 @@ class RAGAgent:
                 "Do NOT include inline citations, doc_ids, chunk_ids, page numbers, or source notes in the answer body. "
                 "The UI will display citations separately. Focus only on the answer. "
                 "If vector_search returns no relevant chunks, do not claim internal knowledge. "
-                "If insufficient info, say so explicitly without guessing."
+                "If insufficient info, say so explicitly without guessing. "
+                "Format the response as: "
+                "First a single paragraph (no label), "
+                "then bullet points (no label),"
+                "then a short summary (label)"
             )
 
             messages: List[Dict] = [{"role": "system", "content": system_prompt}]

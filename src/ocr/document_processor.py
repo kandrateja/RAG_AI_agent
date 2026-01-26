@@ -2,6 +2,7 @@
 Azure Document Intelligence OCR Processor
 """
 import os
+import fitz
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from typing import List, Dict, Optional
@@ -55,14 +56,19 @@ class DocumentProcessor:
             if result.content:
                 extracted_text = result.content
             
-            # Extract pages
+            # Extract pages with page-level text
             pages = []
             if result.pages:
                 for page in result.pages:
+                    page_lines = []
+                    if hasattr(page, "lines") and page.lines:
+                        page_lines = [line.content for line in page.lines if getattr(line, "content", None)]
+                    page_text = " ".join(page_lines).strip()
                     pages.append({
                         "page_number": page.page_number,
                         "width": page.width,
-                        "height": page.height
+                        "height": page.height,
+                        "text": page_text
                     })
             
             # Extract tables if present
@@ -120,34 +126,43 @@ class DocumentProcessor:
         result = self.analyze_document(document_path)
         full_text = result.get("text", "")
         pages_info = result.get("pages", [])
-        
-        # If we have page information, try to split text by pages
-        # Note: Azure Document Intelligence may not provide page-level text directly
-        # This is a simplified approach - you may need to enhance based on actual API response
+
         pages = []
-        if pages_info and full_text:
-            # Estimate page boundaries (simplified - adjust based on actual API)
-            total_chars = len(full_text)
-            num_pages = len(pages_info)
-            chars_per_page = total_chars // num_pages if num_pages > 0 else total_chars
-            
+        if pages_info:
             for i, page_info in enumerate(pages_info):
-                start_idx = i * chars_per_page
-                end_idx = (i + 1) * chars_per_page if i < num_pages - 1 else total_chars
-                page_text = full_text[start_idx:end_idx].strip()
-                
+                page_text = (page_info.get("text") or "").strip()
+                if not page_text and full_text:
+                    # Fallback to full text if page text is missing
+                    page_text = full_text
                 pages.append({
                     "page_number": page_info.get("page_number", i + 1),
                     "text": page_text
                 })
         else:
-            # Fallback: single page
             pages = [{"page_number": 1, "text": full_text}]
         
         return {
             "text": full_text,
             "pages": pages
         }
+
+    def extract_page_images(self, document_path: str, dpi: int = 150) -> List[Dict]:
+        """
+        Render each PDF page to an image for vision-based captioning.
+        """
+        images: List[Dict] = []
+        try:
+            doc = fitz.open(document_path)
+            for idx, page in enumerate(doc):
+                pix = page.get_pixmap(dpi=dpi)
+                images.append({
+                    "page_number": idx + 1,
+                    "image_bytes": pix.tobytes("png"),
+                })
+            return images
+        except Exception as e:
+            logger.error(f"Error extracting page images: {str(e)}")
+            return images
     
     def process_batch(self, document_paths: List[str]) -> List[Dict]:
         """

@@ -8,10 +8,11 @@ A comprehensive Retrieval-Augmented Generation (RAG) AI agent that combines Azur
 
 ## Features
 
-- **Azure Document Intelligence**: OCR and document extraction from scanned PDFs (non-text, image-based)
+- **Azure Document Intelligence**: OCR and page-accurate text extraction from scanned PDFs (non-text, image-based)
 - **Azure OpenAI**: 
   - Text embeddings using `text-embedding-3-small` (1536 dims, HNSW compatible) 
-  - LLM chat completions using Azure OpenAI deployments
+  - LLM chat completions using Azure OpenAI deployments (e.g., `gpt-4o`)
+  - Vision captions (page-level) via a vision-capable deployment (e.g., `gpt-4o`)
   - Entity + relationship extraction (LLM-assisted) to populate the graph
 - **Vector DB (Postgres + pgvector)**:
   - Primary semantic retrieval over chunks
@@ -26,6 +27,7 @@ A comprehensive Retrieval-Augmented Generation (RAG) AI agent that combines Azur
 - **Comprehensive Citations**: All answers include citations with doc_id, page_number, and chunk_id
 - **Provenance Tracking**: Explicit indication of answer source (internal/online/both/none)
 - **Decision Trace**: Shows routing thresholds, similarity scores, and graph confidence
+- **Re-ranking**: Initial fetch → rerank (vector + keyword + graph boost) → final top_k
 - **Robust Error Handling**: Handles OCR failures, empty retrieval, tool failures gracefully
 - **Observability**: Comprehensive logging of all retrieval steps and tool calls
 
@@ -65,7 +67,7 @@ RAG_AI_agent/
 1. **Azure Account** with:
    - Azure Document Intelligence resource
    - Azure OpenAI resource with:
-     - Chat completion model deployment (e.g., GPT-4, GPT-3.5)
+     - Chat completion model deployment (e.g., GPT-4o)
      - Embedding model deployment (`text-embedding-3-small` recommended for HNSW)
 
 2. **Docker** (for Postgres + Neo4j containers)
@@ -106,7 +108,7 @@ AZURE_DOCUMENT_INTELLIGENCE_KEY=your-document-intelligence-key
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-openai-api-key
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NAME=your-deployment-name
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
 
 # Neo4j
@@ -229,18 +231,19 @@ agent.close()
 ### Document Ingestion Flow
 
 1. **Deduplication Check**: Uses `doc_id` and PDF `doc_hash` to prevent duplicates.
-2. **OCR Extraction**: Azure Document Intelligence extracts text from scanned PDFs with page-level information.
-3. **Entity/Relationship Extraction**: LLM-based extraction creates entity/relationship nodes in Neo4j.
-4. **Text Chunking**: Split into chunks, preserving `page_number`.
-5. **Embedding Generation**: Azure OpenAI generates embeddings for each chunk.
-6. **Vector Storage (Postgres + pgvector)**: Stores chunk embeddings + required provenance (`doc_id`, `page_number`, `chunk_id`, `text`).
-7. **Graph Storage (Neo4j)**: Stores entities/relationships, plus `ChunkRef(chunk_id)` nodes linked via `(:ChunkRef)-[:MENTIONS]->(:Entity)` for query-time graph expansion.
+2. **OCR Extraction**: Azure Document Intelligence extracts page-level text from scanned PDFs.
+3. **Vision Captions (page-level)**: Each PDF page is rendered to an image and captioned with a vision-capable model (e.g., `gpt-4o`). Captions are merged into the same page text so they stay aligned by `page_number`.
+4. **Entity/Relationship Extraction**: LLM-based extraction creates entity/relationship nodes in Neo4j.
+5. **Text Chunking**: Split into chunks, preserving `page_number`.
+6. **Embedding Generation**: Azure OpenAI generates embeddings for each chunk.
+7. **Vector Storage (Postgres + pgvector)**: Stores chunk embeddings + required provenance (`doc_id`, `page_number`, `chunk_id`, `text`).
+8. **Graph Storage (Neo4j)**: Stores entities/relationships, plus `ChunkRef(chunk_id)` nodes linked via `(:ChunkRef)-[:MENTIONS]->(:Entity)` for query-time graph expansion.
 
 ### Query Flow
 
-1. **Vector Retrieval (pgvector)**: Compute similarity and get top-k chunks.
+1. **Vector Retrieval (pgvector)**: Fetch initial_k, rerank, then keep top_k chunks.
    - Hybrid ranking uses **semantic + keyword** scores.
-   - Keyword search uses Postgres full-text search; scores are normalized and blended with cosine similarity.
+   - Graph boost favors chunks linked to entities in Neo4j.
 2. **Routing by thresholds**:
    - `vector_best_score >= 0.7` → vector-only
    - `0.3 <= vector_best_score < 0.7` → vector + graph
@@ -272,7 +275,9 @@ Edit `config.py` or set environment variables to customize:
 ### Document Processor (`src/ocr/document_processor.py`)
 - Uses Azure Document Intelligence API
 - Supports various document formats (PDF, images, etc.)
-- Extracts text, tables, and page information
+- Extracts page-level text using OCR lines
+- Renders page images for vision captioning (PyMuPDF)
+- Vision captions are merged into page text before chunking
 
 ### Embedding Generator (`src/embeddings/embedding_generator.py`)
 - Uses Azure OpenAI embedding models

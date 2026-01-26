@@ -122,3 +122,38 @@ class AzureOpenAIClient:
         except Exception as e:
             logger.error(f"Error in streaming chat completion: {str(e)}")
             raise
+
+    def chat_completion_with_image(
+        self,
+        prompt: str,
+        image_base64: str,
+        max_completion_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """
+        Generate chat completion with an image input (vision-capable models).
+        """
+        try:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                        },
+                    ],
+                }
+            ]
+            req = {
+                "model": self.deployment_name,
+                "messages": messages,
+                "max_completion_tokens": max_completion_tokens or self.max_tokens,
+                **kwargs,
+            }
+            response = self.client.chat.completions.create(**req)
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error in image chat completion: {str(e)}")
+            raise

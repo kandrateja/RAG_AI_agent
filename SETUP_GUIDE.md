@@ -11,8 +11,8 @@ Before starting, ensure you have:
 - [ ] **Azure Account** with:
   - Azure Document Intelligence resource
   - Azure OpenAI resource with deployments for:
-    - Chat completion model (e.g., GPT-4, GPT-3.5)
-    - Embedding model (`text-embedding-3-large`)
+    - Chat completion model (e.g., GPT-4o, vision-capable)
+    - Embedding model (`text-embedding-3-small`)
 - [ ] **Surf API** credentials (optional, for web search fallback)
 - [ ] At least one **scanned PDF document** to test with
 
@@ -131,8 +131,8 @@ AZURE_DOCUMENT_INTELLIGENCE_KEY=your-actual-key-here
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-actual-key-here
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4  # or your deployment name
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o  # vision-capable deployment
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
 
 # Neo4j
 NEO4J_URI=bolt://localhost:7687
@@ -222,6 +222,8 @@ Open the UI at `http://localhost:8000/`.
 4. Click **Ingest** and wait for the success message.
 
 **Note on deduplication:** If you re-ingest the same PDF, it may be skipped because the document hash is stored in Postgres. To re-ingest, clear the `documents` and `chunks` tables in Postgres.
+
+**Note on vision captions:** If you enabled page-level image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF) and captions it with a vision-capable model (e.g., `gpt-4o`).
 
 ### 5.2 Verify Data in Databases (Optional)
 
