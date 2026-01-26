@@ -57,6 +57,8 @@ services:
       # Override database connections to use service names
       POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/rag
       NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASSWORD: rag-neo4j-password-2024
+      NEO4J_USERNAME: neo4j
     volumes:
       - ./ui:/app/ui  # Mount UI files
       - ./uploads:/app/uploads  # For document uploads (optional)
