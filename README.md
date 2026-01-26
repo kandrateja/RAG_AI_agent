@@ -16,6 +16,10 @@ A comprehensive Retrieval-Augmented Generation (RAG) AI agent that combines Azur
   - Entity + relationship extraction (LLM-assisted) to populate the graph
 - **Vector DB (Postgres + pgvector)**:
   - Primary semantic retrieval over chunks
+  - **Hybrid search**: Combines semantic similarity (70%) + flexible keyword search (30%)
+  - **Flexible keyword search**: Uses PostgreSQL full-text search with OR logic (any query word can match)
+  - HNSW index enabled for fast similarity search (when embedding dims <= 2000)
+  - GIN index on text column for fast keyword search
   - Stores required provenance per chunk: **doc_id, page_number, chunk_id, text**
 - **Graph DB (Neo4j)**:
   - Stores entities + relationships
@@ -156,7 +160,7 @@ agent.close()
 from src.rag_agent import RAGAgent
 
 agent = RAGAgent()
-result = agent.query("What are the main topics in the documents?", top_k=5)
+result = agent.query("What are muscle spindles, and how do they contribute to proprioception?", top_k=5)
 print(f"Answer: {result['answer']}")
 print(f"Retrieved chunks: {len(result['retrieved_chunks'])}")
 agent.close()
@@ -183,7 +187,8 @@ Example query request:
 curl -X POST "http://localhost:8000/query" \
   -H "Content-Type: application/json" \
   -d '{
-        "question": "What are the main topics in the documents?",
+        "question": "What are muscle spindles, and how do they contribute to proprioception?
+",
         "top_k": 5,
         "use_graph_context": true
       }'
@@ -193,7 +198,8 @@ Example query response:
 
 ```json
 {
-  "question": "What are the main topics in the documents?",
+  "question": "What are muscle spindles, and how do they contribute to proprioception?
+",
   "answer": "Based on the internal knowledge base...",
   "citations": [
     {
@@ -232,7 +238,7 @@ agent.close()
 
 1. **Deduplication Check**: Uses `doc_id` and PDF `doc_hash` to prevent duplicates.
 2. **OCR Extraction**: Azure Document Intelligence extracts page-level text from scanned PDFs.
-3. **Vision Captions (page-level)**: Each PDF page is rendered to an image and captioned with a vision-capable model (e.g., `gpt-4o`). Captions are merged into the same page text so they stay aligned by `page_number`.
+3. **Vision Captions (page-level)**: Each PDF page is rendered to an image and sent to a vision-capable model (e.g., `gpt-4o`) to detect whether a diagram/table is present. Captions are only kept when a diagram is detected, and are merged into the same page text to stay aligned by `page_number`.
 4. **Entity/Relationship Extraction**: LLM-based extraction creates entity/relationship nodes in Neo4j.
 5. **Text Chunking**: Split into chunks, preserving `page_number`.
 6. **Embedding Generation**: Azure OpenAI generates embeddings for each chunk.
@@ -242,7 +248,9 @@ agent.close()
 ### Query Flow
 
 1. **Vector Retrieval (pgvector)**: Fetch initial_k, rerank, then keep top_k chunks.
-   - Hybrid ranking uses **semantic + keyword** scores.
+   - **Hybrid search**: Combines semantic similarity (cosine) + flexible keyword search (PostgreSQL full-text with OR logic)
+   - **Flexible keyword matching**: Query words are joined with OR (`word1 | word2 | word3`), so chunks matching any word are included (ranked by relevance)
+   - **Re-ranking**: Combines hybrid similarity (60%) + keyword overlap (25%) + graph boost (15%)
    - Graph boost favors chunks linked to entities in Neo4j.
 2. **Routing by thresholds**:
    - `vector_best_score >= 0.7` → vector-only
@@ -277,12 +285,22 @@ Edit `config.py` or set environment variables to customize:
 - Supports various document formats (PDF, images, etc.)
 - Extracts page-level text using OCR lines
 - Renders page images for vision captioning (PyMuPDF)
-- Vision captions are merged into page text before chunking
+- Captions are only kept when a diagram is detected, then merged into page text before chunking
 
 ### Embedding Generator (`src/embeddings/embedding_generator.py`)
 - Uses Azure OpenAI embedding models
 - Supports `text-embedding-3-small` (1536 dimensions)
 - Batch processing support
+
+### Postgres Vector Store (`src/vectorstore/postgres_pgvector.py`)
+- Implements hybrid semantic + keyword search
+- **Semantic search**: Cosine similarity using pgvector (HNSW index when dims <= 2000)
+- **Keyword search**: PostgreSQL full-text search with flexible OR-based matching
+  - Query words joined with OR (`word1 | word2 | word3`)
+  - Uses `to_tsquery` for flexible matching and `ts_rank_cd` for ranking
+  - GIN index on `to_tsvector('english', text)` for performance
+- Hybrid scoring: 70% semantic + 30% keyword (normalized)
+- Stores chunk embeddings with provenance (doc_id, page_number, chunk_id, text)
 
 ### Neo4j Client (`src/graphrag/neo4j_client.py`)
 - Chunk/entity linking and graph expansion
@@ -372,6 +390,15 @@ This system meets all the functional requirements:
 For better performance with large datasets:
 - HNSW is enabled automatically when embedding dimensions are <= 2000
 - Use `text-embedding-3-small` (1536 dims) to allow HNSW in pgvector
+- GIN index on `to_tsvector('english', text)` speeds up keyword search
 - Adjust `top_k` and similarity thresholds
+
+### Keyword Search Details
+
+The system uses PostgreSQL's full-text search with **flexible OR-based matching**:
+- Query words are automatically joined with OR operators (`word1 | word2 | word3`)
+- Chunks matching **any** query word are included (not requiring all words)
+- Results are ranked by relevance: chunks with more matching words score higher
+- Uses `ts_rank_cd` for ranking and `to_tsquery` for flexible matching
 
 

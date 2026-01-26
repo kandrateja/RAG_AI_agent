@@ -223,7 +223,9 @@ Open the UI at `http://localhost:8000/`.
 
 **Note on deduplication:** If you re-ingest the same PDF, it may be skipped because the document hash is stored in Postgres. To re-ingest, clear the `documents` and `chunks` tables in Postgres.
 
-**Note on vision captions:** If you enabled page-level image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF) and captions it with a vision-capable model (e.g., `gpt-4o`).
+**Note on vision captions:** If you enabled image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF), asks the vision model to detect whether a diagram is present, and only keeps a caption when a diagram/table is detected (then merges it into that page’s text).
+
+**Note on hybrid search:** The system uses a hybrid approach combining semantic similarity (70%) and flexible keyword search (30%). **Semantic search** uses cosine similarity with pgvector (HNSW index for fast retrieval). **Keyword search** uses flexible OR-based matching - any word in your question can match chunks (not requiring all words). Results are ranked by relevance - chunks with more matching words score higher. Keyword search uses PostgreSQL's full-text search on the existing `text` column (no separate column needed).
 
 ### 5.2 Verify Data in Databases (Optional)
 
@@ -262,6 +264,7 @@ LIMIT 10;
 ## Step 6: Query via UI (Recommended)
 
 1. In the chat box, ask a question about your documents.
+   sample query for pdf_a.pdf: What are muscle spindles, and how do they contribute to proprioception?
 2. Review the answer and citations shown under the response.
 3. If the question is outside your internal docs, the system will use web search (if configured).
 

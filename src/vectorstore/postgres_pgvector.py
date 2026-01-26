@@ -15,6 +15,7 @@ Also supports deduplication via:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 import os
 from typing import Any, Dict, List, Optional, Sequence
@@ -200,6 +201,17 @@ class PostgresVectorStore:
     def _keyword_search(self, query_text: str, top_k: int) -> List[tuple]:
         if not query_text.strip():
             return []
+        
+        # Convert query to flexible OR-based tsquery (any word can match)
+        # Split into words, filter out empty, join with OR operator
+        words = [w.strip() for w in re.split(r'\s+', query_text.lower()) if w.strip()]
+        if not words:
+            return []
+        
+        # Build OR query: word1 | word2 | word3
+        # Escape special characters and join with OR operator
+        or_query = ' | '.join([re.sub(r'[^\w\s]', '', w) for w in words if re.sub(r'[^\w\s]', '', w)])
+        
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -207,16 +219,16 @@ class PostgresVectorStore:
                     SELECT c.chunk_id, c.doc_id, c.page_number, c.text,
                            ts_rank_cd(
                              to_tsvector('english', c.text),
-                             plainto_tsquery('english', %s)
+                             to_tsquery('english', %s)
                            ) AS kw_score,
                            d.source_path
                     FROM chunks c
                     JOIN documents d ON c.doc_id = d.doc_id
-                    WHERE to_tsvector('english', c.text) @@ plainto_tsquery('english', %s)
+                    WHERE to_tsvector('english', c.text) @@ to_tsquery('english', %s)
                     ORDER BY kw_score DESC
                     LIMIT %s
                     """,
-                    (query_text, query_text, top_k),
+                    (or_query, or_query, top_k),
                 )
                 return cur.fetchall() or []
 
