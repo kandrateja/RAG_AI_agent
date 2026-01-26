@@ -1,200 +1,58 @@
-# Complete Setup and Testing Guide
+# Setup and Testing Guide
 
-This guide walks you through setting up and testing the RAG AI Agent system from scratch.
+This guide walks you through setting up and running the RAG AI Agent system using Docker Compose.
 
-## Prerequisites Checklist
+## Prerequisites
 
 Before starting, ensure you have:
 
 - [ ] **Docker** and **Docker Compose** installed
-- [ ] **Python 3.9+** installed (if running app locally instead of in Docker)
 - [ ] **Azure Account** with:
   - Azure Document Intelligence resource
   - Azure OpenAI resource with deployments for:
     - Chat completion model (e.g., GPT-4o, vision-capable)
     - Embedding model (`text-embedding-3-small`)
-- [ ] **Surf API** credentials (optional, for web search fallback)
+- [ ] **Surf API** credentials (optional, for web search fallback) you get these credentials from here https://serpapi.com/
 - [ ] At least one **scanned PDF document** to test with
 
 ---
 
-## Quick Start: Docker Compose (Recommended)
+## Step 1: Clone the Repository
 
-**Fastest way to get everything running:**
-
-1. **Clone and navigate to project**:
 ```bash
-cd /Users/tejakandra/Downloads/AI-project-app/RAG_AI_agent
+git clone <repository-url>
+cd RAG_AI_agent
 ```
 
-2. **Set up environment variables**:
+---
+
+## Step 2: Configure Environment Variables
+
+1. **Create `.env` file**:
 ```bash
 cp .env.example .env
-# Edit .env with your Azure credentials
 ```
 
-3. **Update database connections in .env for Docker**:
-```env
-POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/rag
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_PASSWORD=rag-neo4j-password-2024
-```
-
-4. **Start all services**:
-```bash
-docker-compose up -d
-```
-
-5. **Access the system**:
-- UI: `http://localhost:8000/`
-- API: `http://localhost:8000/docs`
-- Neo4j Browser: `http://localhost:7474/` (login: neo4j / rag-neo4j-password-2024)
-
-6. **Stop services**:
-```bash
-docker-compose down
-```
-
-**Note**: This starts Postgres, Neo4j, and the API server. For local development, you can run only databases with Docker:
-```bash
-# Start only databases
-docker-compose -f docker-compose.dev.yml up -d
-
-# Then run Python app locally (see Step 5 below)
-uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-```
-
----
-
-## Manual Setup (Alternative)
-
-If you prefer to run databases and Python app separately:
-
-## Step 1: Database Setup
-
-### 1.1 Setup PostgreSQL with pgvector (Docker)
-
-```bash
-# Pull PostgreSQL image with pgvector
-docker pull pgvector/pgvector:pg16
-
-# Run PostgreSQL container
-docker run -d \
-  --name postgres-rag \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=rag \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
-
-# Verify it's running
-docker ps | grep postgres-rag
-```
-
-### 1.2 Setup Neo4j (Docker)
-
-```bash
-docker run -d \
-  --name neo4j \
-  -p 7474:7474 -p 7687:7687 \
-  -e NEO4J_AUTH=neo4j/your-strong-password \
-  -v neo4j_data:/data \
-  neo4j:latest
-
-# Access Neo4j Browser at http://localhost:7474
-```
-
-**Note:** Neo4j does not allow the default password `neo4j`. Use a strong password.
-
----
-
-## Step 2: Python Environment Setup
-
-### 2.1 Navigate to Project Directory
-
-```bash
-cd /Users/tejakandra/Downloads/AI-project-app/RAG_AI_agent
-```
-
-### 2.2 Create Virtual Environment
-
-```bash
-# Create virtual environment
-python3 -m venv venv
-
-# Activate virtual environment
-# On macOS/Linux:
-source venv/bin/activate
-
-# On Windows:
-# venv\Scripts\activate
-```
-
-You should see `(venv)` in your terminal prompt.
-
-### 2.3 Install Dependencies
-
-```bash
-# Upgrade pip first
-pip install --upgrade pip
-
-# Install all requirements
-pip install -r requirements.txt
-```
-
-**Expected output:** All packages should install successfully. This may take a few minutes.
-
-**Verify installation:**
-
-```bash
-python -c "import psycopg; import neo4j; import openai; print('All imports successful!')"
-```
-
----
-
-## Step 3: Environment Configuration
-
-### 3.1 Create `.env` File
-
-```bash
-# Copy the example file
-cp .env.example .env
-
-# Edit the .env file
-# On macOS/Linux:
-nano .env
-# or
-code .env  # if you have VS Code
-
-# On Windows:
-notepad .env
-```
-
-### 3.2 Fill in Your Credentials
-
-Edit `.env` with your actual values:
+2. **Edit `.env` file** and fill in your Azure credentials:
 
 ```env
-# Azure Document Intelligence
-AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://your-resource.cognitiveservices.azure.com/
-AZURE_DOCUMENT_INTELLIGENCE_KEY=your-actual-key-here
+# Required: Azure Document Intelligence
+AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://your-endpoint.cognitiveservices.azure.com/
+AZURE_DOCUMENT_INTELLIGENCE_KEY=your-actual-key
 
-# Azure OpenAI
+# Required: Azure OpenAI
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_API_KEY=your-actual-key-here
+AZURE_OPENAI_API_KEY=your-actual-key
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o  # vision-capable deployment
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
 
-# Neo4j
-NEO4J_URI=bolt://localhost:7687
+# Database connections (for Docker Compose - use service names)
+POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/rag
+NEO4J_URI=bolt://neo4j:7687
 NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your-neo4j-password
+NEO4J_PASSWORD=rag-neo4j-password-2024
 NEO4J_DATABASE=neo4j
-
-# Postgres (pgvector)
-POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/rag
-# Adjust if your Postgres credentials are different
 
 # Application Settings (optional - defaults are fine)
 CHUNK_SIZE=1000
@@ -203,95 +61,101 @@ MAX_TOKENS=4096
 TEMPERATURE=0.7
 
 # Web Search (Surf-like API) - OPTIONAL
-# Leave these empty if you don't have Surf API
 SURF_API_ENDPOINT=
 SURF_API_KEY=
 SURF_MAX_RESULTS=5
 ```
 
-**Important:** 
-- Replace all `your-*` placeholders with actual values
-- Ensure Postgres DSN matches your database credentials
-- Ensure Neo4j password matches your Neo4j instance
-
-### 3.3 Verify Configuration
-
-```bash
-# Test that config loads correctly
-python -c "from config import settings; print('Config loaded successfully!')"
-```
+**Important Notes:**
+- Replace all `your-*` placeholders with actual Azure credentials
+- Database connection strings use service names (`postgres`, `neo4j`) not `localhost` for Docker
+- **Neo4j password must be**: `rag-neo4j-password-2024` (matches Docker Compose configuration)
 
 ---
 
-## Step 4: Database Initialization
-
-The system will automatically create tables/indexes on first run, but you can verify:
-
-### 4.1 Verify PostgreSQL Connection
+## Step 3: Start the System
 
 ```bash
-# Test Postgres connection
-psql -d rag -c "SELECT version();"
-psql -d rag -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+docker-compose up -d
 ```
 
-### 4.2 Verify Neo4j Connection
+This will:
+- Pull required Docker images (first time only)
+- Start PostgreSQL with pgvector
+- Start Neo4j
+- Build and start the RAG API server
 
+**Wait for services to be healthy** (about 30-60 seconds on first run).
+
+Verify services are running:
 ```bash
-# Test Neo4j connection (using cypher-shell if installed)
-cypher-shell -a bolt://localhost:7687 -u neo4j -p your-password "RETURN 1;"
+docker-compose ps
 ```
 
-Or test via Python:
-
-```bash
-python -c "
-from neo4j import GraphDatabase
-driver = GraphDatabase.driver('bolt://localhost:7687', auth=('neo4j', 'your-password'))
-with driver.session() as session:
-    result = session.run('RETURN 1 as test')
-    print('Neo4j connection successful!', result.single()['test'])
-driver.close()
-"
-```
+All containers should show as "Up" and "healthy".
 
 ---
 
-## Step 5: Start the API + UI (Recommended)
+## Step 4: Access the System
 
-```bash
-# From project root directory
-uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-```
+- **Web UI**: http://localhost:8000/
+- **API Documentation**: http://localhost:8000/docs
+- **Health Check**: http://localhost:8000/health
+- **Neo4j Browser**: http://localhost:7474/
+  - Username: `neo4j`
+  - Password: `rag-neo4j-password-2024`
 
-Open the UI at `http://localhost:8000/`.
 
-### 5.1 Ingest via UI (Recommended)
 
-1. Open the **Ingestion** panel in the left sidebar.
-2. Upload a scanned PDF.
-3. (Optional) Set a `doc_id`.
-4. Click **Ingest** and wait for the success message.
+## Step 5: Test the System
+
+### 5.1 Ingest a Document
+
+1. Open the Web UI: http://localhost:8000/
+2. Navigate to the **Ingestion** panel in the left sidebar
+3. Upload a scanned PDF document
+5. Click **Ingest** and wait for the success message
 
 **Note on deduplication:** If you re-ingest the same PDF, it may be skipped because the document hash is stored in Postgres. To re-ingest, clear the `documents` and `chunks` tables in Postgres.
 
-**Note on vision captions:** If you enabled image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF), asks the vision model to detect whether a diagram is present, and only keeps a caption when a diagram/table is detected (then merges it into that page’s text).
+**Note on vision captions:** If you enabled image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF), asks the vision model to detect whether a diagram is present, and only keeps a caption when a diagram/table is detected (then merges it into that page's text).
 
 **Note on hybrid search:** The system uses a hybrid approach combining semantic similarity (70%) and flexible keyword search (30%). **Semantic search** uses cosine similarity with pgvector (HNSW index for fast retrieval). **Keyword search** uses flexible OR-based matching - any word in your question can match chunks (not requiring all words). Results are ranked by relevance - chunks with more matching words score higher. Keyword search uses PostgreSQL's full-text search on the existing `text` column (no separate column needed).
 
-### 5.2 Verify Data in Databases (Optional)
+### 5.2 Query the System
 
-**Check Postgres:**
+1. In the chat box, ask a question about your documents.
+   Sample query for pdf_a.pdf: What are muscle spindles, and how do they contribute to proprioception?
+2. Review the answer and citations shown under the response.
+3. If the question is outside your internal docs, the system will use web search (if configured).
 
-```bash
-psql -d rag -c "SELECT COUNT(*) as total_chunks FROM chunks;"
-psql -d rag -c "SELECT doc_id, COUNT(*) as chunks FROM chunks GROUP BY doc_id;"
+---
+
+## Step 6: Verify Data in Databases (Optional)
+
+### Check Postgres
+
+Connect using TablePlus or any PostgreSQL client:
+- **Host**: `localhost`
+- **Port**: `5432`
+- **Username**: `postgres`
+- **Password**: `postgres`
+- **Database**: `rag`
+
+Query examples:
+```sql
+SELECT COUNT(*) as total_chunks FROM chunks;
+SELECT doc_id, COUNT(*) as chunks FROM chunks GROUP BY doc_id;
 ```
 
-**Check Neo4j:**
+### Check Neo4j
 
-Open Neo4j Browser (http://localhost:7474) and run:
+1. Open Neo4j Browser: http://localhost:7474/
+2. Login with:
+   - Username: `neo4j`
+   - Password: `rag-neo4j-password-2024`
 
+Run queries:
 ```cypher
 // Count entities
 MATCH (e)
@@ -313,135 +177,110 @@ LIMIT 10;
 
 ---
 
-## Step 6: Query via UI (Recommended)
+## Step 7: Stop the System
 
-1. In the chat box, ask a question about your documents.
-   sample query for pdf_a.pdf: What are muscle spindles, and how do they contribute to proprioception?
-2. Review the answer and citations shown under the response.
-3. If the question is outside your internal docs, the system will use web search (if configured).
+```bash
+docker-compose down
+```
+
+To remove all data (fresh start):
+```bash
+docker-compose down -v
+```
 
 ---
 
-## Step 7: CLI (Optional)
+## Troubleshooting
 
-If you prefer a script-based flow, use the included CLI test files:
-
-```bash
-python test_ingest.py
-python test_query.py
-```
-
-## Step 8: HTTP API (Optional)
-
-### 8.1 Test Health Endpoint
+### Services won't start
 
 ```bash
-curl http://localhost:8000/health
+# Check logs
+docker-compose logs
+
+# Check specific service logs
+docker-compose logs rag-api
+docker-compose logs postgres
+docker-compose logs neo4j
+
+# Restart services
+docker-compose restart
 ```
 
-Expected response:
-```json
-{"status":"ok","agent_initialized":true}
-```
+### API server errors
 
-### 8.2 Ingest Document via API
+- Verify `.env` file has correct Azure credentials
+- Check database connections are using service names (`postgres`, `neo4j`)
+- Ensure Neo4j password in `.env` matches: `rag-neo4j-password-2024`
 
-```bash
-curl -X POST "http://localhost:8000/ingest" \
-  -F "file=@test_documents/test.pdf" \
-  -F "doc_id=test-doc-001"
-```
+### Port conflicts
 
-### 8.3 Query via API
+If ports 5432, 7474, 7687, or 8000 are already in use:
+- Stop conflicting services, or
+- Update port mappings in `docker-compose.yml`
 
-```bash
-curl -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What are the main topics in the documents?",
-    "top_k": 5,
-    "use_graph_context": true
-  }'
-```
+### Neo4j authentication errors
 
-### 8.4 Access API Documentation
-
-Open in browser:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+If you see "The client is unauthorized due to authentication failure":
+- Ensure `NEO4J_PASSWORD=rag-neo4j-password-2024` in your `.env` file
+- Restart the API container: `docker-compose restart rag-api`
 
 ---
 
-## Step 9: Troubleshooting
+## Development Mode (Optional)
 
-### Common Issues
+To run only databases in Docker and Python app locally:
 
-#### Issue: "Failed to connect to Neo4j"
-
-**Solution:**
 ```bash
-# Check Neo4j is running
-docker ps | grep neo4j
-# or check Neo4j Desktop
+# Start only databases
+docker-compose -f docker-compose.dev.yml up -d
 
-# Verify credentials in .env
-# Test connection manually
+# Update .env to use localhost for databases
+POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/rag
+NEO4J_URI=bolt://localhost:7687
+
+# Run Python app locally
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### Issue: "psycopg.OperationalError: connection refused"
+---
 
-**Solution:**
+## Quick Reference
+
 ```bash
-# Check Postgres is running
-docker ps | grep postgres
-# or
-pg_isready
+# Start everything
+docker-compose up -d
 
-# Verify POSTGRES_DSN in .env matches your setup
+# Check status
+docker-compose ps
+
+# View logs
+docker-compose logs -f
+
+# Stop everything
+docker-compose down
+
+# Remove all data
+docker-compose down -v
+
+# Restart a specific service
+docker-compose restart rag-api
 ```
 
-
+---
 
 ## Summary Checklist
 
-- [ ] PostgreSQL (Docker) running
-- [ ] Neo4j (Docker) running
-- [ ] Python virtual environment created and activated
-- [ ] All dependencies installed (`pip install -r requirements.txt`)
-- [ ] `.env` file configured with all credentials
-- [ ] Database connections verified
-- [ ] API server running and accessible
-- [ ] UI ingestion tested
-- [ ] UI chat query tested
-
----
-
-## Quick Reference Commands
-
-```bash
-# Start services
-docker start postgres-rag neo4j
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Start API server
-uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-
-# Open UI
-open http://localhost:8000/
-
-# Optional CLI
-python test_ingest.py
-python test_query.py
-
-# Check Postgres data
-psql -d rag -c "SELECT COUNT(*) FROM chunks;"
-
-# Access Neo4j Browser
-open http://localhost:7474
-```
-
----
-
-
+- [ ] Docker and Docker Compose installed
+- [ ] Repository cloned
+- [ ] `.env` file created and configured with Azure credentials
+- [ ] Database connection strings updated for Docker (service names)
+- [ ] Neo4j password set to `rag-neo4j-password-2024`
+- [ ] `docker-compose up -d` executed successfully
+- [ ] All services running and healthy
+- [ ] Web UI accessible at http://localhost:8000/
+- [ ] Document ingested successfully
+- [ ] Query tested and working
