@@ -115,6 +115,62 @@ function appendMessage(role, text, meta) {
     sourcesSection.wrap.appendChild(badges);
     metaEl.appendChild(sourcesSection.wrap);
 
+    // Retrieved Images (show figures referenced in the answer)
+    const retrievedChunks = meta.retrieved_chunks || [];
+    const imageChunks = retrievedChunks.filter(
+      (c) => c.content_type === "image" && c.image_b64
+    );
+    if (imageChunks.length) {
+      const imagesSection = section("Retrieved Figures");
+      const imagesContainer = document.createElement("div");
+      imagesContainer.className = "retrieved-images";
+      imageChunks.forEach((img, idx) => {
+        const figureWrap = document.createElement("div");
+        figureWrap.className = "figure-card";
+        
+        const figureLabel = document.createElement("div");
+        figureLabel.className = "figure-label";
+        figureLabel.textContent = `Figure ${idx + 1} — Page ${img.page_number ?? "?"}`;
+        figureWrap.appendChild(figureLabel);
+        
+        const imgEl = document.createElement("img");
+        // Detect image type from base64 header or default to png
+        let mediaType = "image/png";
+        try {
+          const decoded = atob(img.image_b64.substring(0, 20));
+          if (decoded.charCodeAt(0) === 0xff && decoded.charCodeAt(1) === 0xd8) {
+            mediaType = "image/jpeg";
+          }
+        } catch (e) {}
+        imgEl.src = `data:${mediaType};base64,${img.image_b64}`;
+        imgEl.alt = `Figure ${idx + 1} from page ${img.page_number ?? "?"}`;
+        imgEl.className = "figure-image";
+        imgEl.onclick = () => {
+          // Open in modal/lightbox on click
+          const modal = document.createElement("div");
+          modal.className = "image-modal";
+          modal.onclick = () => modal.remove();
+          const modalImg = document.createElement("img");
+          modalImg.src = imgEl.src;
+          modalImg.className = "modal-image";
+          modal.appendChild(modalImg);
+          document.body.appendChild(modal);
+        };
+        figureWrap.appendChild(imgEl);
+        
+        if (img.doc_name) {
+          const docLabel = document.createElement("div");
+          docLabel.className = "figure-doc";
+          docLabel.textContent = `Source: ${img.doc_name}`;
+          figureWrap.appendChild(docLabel);
+        }
+        
+        imagesContainer.appendChild(figureWrap);
+      });
+      imagesSection.wrap.appendChild(imagesContainer);
+      metaEl.appendChild(imagesSection.wrap);
+    }
+
     // Citations (internal + web)
     const citationsSection = section("Citations");
     const internalCitations = meta.citations || [];
@@ -133,12 +189,24 @@ function appendMessage(role, text, meta) {
             (rc) => rc.chunk_id === c.chunk_id
           );
           const name = c.doc_name || c.doc_id || "Unknown";
+          
+          // Show source label for images (e.g., "Figure 1")
+          if (c.content_type === "image" && c.source_label) {
+            const figLabel = document.createElement("div");
+            figLabel.className = "meta-line citation-figure";
+            figLabel.textContent = `📊 ${c.source_label}`;
+            li.appendChild(figLabel);
+          }
+          
           const docLine = document.createElement("div");
           docLine.className = "meta-line";
           docLine.textContent = `Document: ${name}`;
           const pageLine = document.createElement("div");
           pageLine.className = "meta-line";
           pageLine.textContent = `Page: ${c.page_number ?? "?"}`;
+          const typeLine = document.createElement("div");
+          typeLine.className = "meta-line";
+          typeLine.textContent = `Type: ${c.content_type || "text"}`;
           const chunkLine = document.createElement("div");
           chunkLine.className = "meta-line";
           chunkLine.textContent = `Chunk: ${c.chunk_id}`;
@@ -152,6 +220,7 @@ function appendMessage(role, text, meta) {
           }
           li.appendChild(docLine);
           li.appendChild(pageLine);
+          li.appendChild(typeLine);
           li.appendChild(chunkLine);
           ul.appendChild(li);
         });

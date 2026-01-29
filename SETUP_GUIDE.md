@@ -1,18 +1,19 @@
 # Setup and Testing Guide
 
-This guide walks you through setting up and running the RAG AI Agent system using Docker Compose.
+Complete step-by-step guide for setting up and running the RAG AI Agent system.
+
+---
 
 ## Prerequisites
 
 Before starting, ensure you have:
 
 - [ ] **Docker** and **Docker Compose** installed
-- [ ] **Azure Account** with:
-  - Azure Document Intelligence resource
-  - Azure OpenAI resource with deployments for:
-    - Chat completion model (e.g., GPT-4o, vision-capable)
-    - Embedding model (`text-embedding-3-small`)
-- [ ] **Surf API** credentials (optional, for web search fallback) you get these credentials from here https://serpapi.com/
+- [ ] **Python 3.9+** installed (only for Option B - local development)
+- [ ] **AWS Account** with Bedrock access for:
+  - Claude Sonnet 4 (LLM + Vision)
+  - Titan Multimodal Embeddings
+- [ ] **SERPAPI Account** for web search (get key from https://serpapi.com/)
 - [ ] At least one **scanned PDF document** to test with
 
 ---
@@ -28,227 +29,385 @@ cd RAG_AI_agent
 
 ## Step 2: Configure Environment Variables
 
-1. **Create `.env` file**:
+### 2.1 Create `.env` file
+
 ```bash
 cp .env.example .env
 ```
 
-2. **Edit `.env` file** and fill in your Azure credentials:
+### 2.2 Edit `.env` file with your credentials
 
 ```env
-# Required: Azure Document Intelligence
-AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=https://your-endpoint.cognitiveservices.azure.com/
-AZURE_DOCUMENT_INTELLIGENCE_KEY=your-actual-key
+# ============================================
+# AWS BEDROCK CONFIGURATION (Required)
+# ============================================
+USE_BEDROCK_LLM=true
+AWS_REGION=us-east-1
+BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-20250514-v1:0
+AWS_ACCESS_KEY_ID=your-aws-access-key-id
+AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
 
-# Required: Azure OpenAI
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_API_KEY=your-actual-key
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
+# ============================================
+# AWS TITAN EMBEDDINGS (Required)
+# ============================================
+USE_TITAN_EMBEDDINGS=true
+TITAN_EMBEDDING_MODEL_ID=amazon.titan-embed-image-v1
 
-# Database connections (for Docker Compose - use service names)
-POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/rag
-NEO4J_URI=bolt://neo4j:7687
+# ============================================
+# NEO4J GRAPH DATABASE (Required)
+# ============================================
+NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=rag-neo4j-password-2024
 NEO4J_DATABASE=neo4j
 
-# Application Settings (optional - defaults are fine)
+# ============================================
+# POSTGRESQL + PGVECTOR (Required)
+# ============================================
+POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/rag
+
+# ============================================
+# WEB SEARCH - SERPAPI (Required)
+# ============================================
+SURF_API_ENDPOINT=https://serpapi.com/search.json
+SURF_API_KEY=your-serpapi-key
+SURF_MAX_RESULTS=5
+
+# ============================================
+# APPLICATION SETTINGS (Optional - defaults shown)
+# ============================================
 CHUNK_SIZE=1000
 CHUNK_OVERLAP=200
 MAX_TOKENS=4096
 TEMPERATURE=0.7
-
-# Web Search (Surf-like API) - OPTIONAL
-SURF_API_ENDPOINT=
-SURF_API_KEY=
-SURF_MAX_RESULTS=5
+INGESTION_PIPELINE_HINT=auto
+INGESTION_VISION_FALLBACK_MIN_CHARS=50
+TRANSLATE_ARABIC_FOR_EMBEDDING=true
 ```
 
-**Important Notes:**
-- Replace all `your-*` placeholders with actual Azure credentials
-- Database connection strings use service names (`postgres`, `neo4j`) not `localhost` for Docker
-- **Neo4j password must be**: `rag-neo4j-password-2024` (matches Docker Compose configuration)
+### 2.3 Important Notes
+
+- **AWS Credentials**: Must have Bedrock access enabled for Claude and Titan models
+- **Neo4j Password**: Must match `rag-neo4j-password-2024` (set in docker-compose.yml)
+- **SERPAPI Key**: Get from https://serpapi.com/ (free tier available)
 
 ---
 
-## Step 3: Start the System
+## Step 3: Choose Your Setup Method
+
+### Option A: Full Docker (Recommended for Reviewers)
+
+This runs everything in Docker - no Python installation needed.
 
 ```bash
+# Start the entire stack
 docker-compose up -d
-```
 
-This will:
-- Pull required Docker images (first time only)
-- Start PostgreSQL with pgvector
-- Start Neo4j
-- Build and start the RAG API server
-
-**Wait for services to be healthy** (about 30-60 seconds on first run).
-
-Verify services are running:
-```bash
+# Wait for services to be healthy (1-2 minutes)
 docker-compose ps
+
+# View logs
+docker-compose logs -f
 ```
 
-All containers should show as "Up" and "healthy".
+All services should show "Up (healthy)":
+```
+NAME          STATUS                   PORTS
+postgres-rag  Up (healthy)             0.0.0.0:5432->5432/tcp
+neo4j-rag     Up (healthy)             0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
+rag-api       Up (healthy)             0.0.0.0:8000->8000/tcp
+```
+
+**That's it!** Skip to Step 6 to access the system.
 
 ---
 
-## Step 4: Access the System
+### Option B: Local Development (Databases in Docker, App Local)
 
-- **Web UI**: http://localhost:8000/
-- **API Documentation**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health
-- **Neo4j Browser**: http://localhost:7474/
-  - Username: `neo4j`
-  - Password: `rag-neo4j-password-2024`
+Use this for development with hot-reload.
 
+#### 3B.1 Start databases only
 
+```bash
+docker-compose -f docker-compose.dev.yml up -d
+```
 
-## Step 5: Test the System
+#### 3B.2 Verify databases are running
 
-### 5.1 Ingest a Document
+```bash
+docker ps
+```
 
-1. Open the Web UI: http://localhost:8000/
-2. Navigate to the **Ingestion** panel in the left sidebar
-3. Upload a scanned PDF document
-5. Click **Ingest** and wait for the success message
+You should see:
+```
+CONTAINER ID   IMAGE                    STATUS          PORTS
+xxxx           pgvector/pgvector:pg16   Up (healthy)    0.0.0.0:5432->5432/tcp
+xxxx           neo4j:5                  Up (healthy)    0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
+```
 
-**Note on deduplication:** If you re-ingest the same PDF, it may be skipped because the document hash is stored in Postgres. To re-ingest, clear the `documents` and `chunks` tables in Postgres.
+#### 3B.3 Wait for Neo4j to be ready (first time only)
 
-**Note on vision captions:** If you enabled image captions, you must re-ingest to store the merged page text. The system renders each PDF page as an image (PyMuPDF), asks the vision model to detect whether a diagram is present, and only keeps a caption when a diagram/table is detected (then merges it into that page's text).
+```bash
+docker logs -f neo4j-rag
+```
 
-**Note on hybrid search:** The system uses a hybrid approach combining semantic similarity (70%) and flexible keyword search (30%). **Semantic search** uses cosine similarity with pgvector (HNSW index for fast retrieval). **Keyword search** uses flexible OR-based matching - any word in your question can match chunks (not requiring all words). Results are ranked by relevance - chunks with more matching words score higher. Keyword search uses PostgreSQL's full-text search on the existing `text` column (no separate column needed).
-
-### 5.2 Query the System
-
-1. In the chat box, ask a question about your documents.
-   Sample query for pdf_a.pdf: What are muscle spindles, and how do they contribute to proprioception?
-2. Review the answer and citations shown under the response.
-3. If the question is outside your internal docs, the system will use web search (if configured).
+Press `Ctrl+C` once you see "Started."
 
 ---
 
-## Step 6: Verify Data in Databases (Optional)
+## Step 4: Install Python Dependencies (Option B Only)
 
-### Check Postgres
+Skip this step if you're using Option A (Full Docker).
 
-Connect using TablePlus or any PostgreSQL client:
-- **Host**: `localhost`
-- **Port**: `5432`
-- **Username**: `postgres`
-- **Password**: `postgres`
-- **Database**: `rag`
+### 4.1 Create virtual environment
 
-Query examples:
-```sql
-SELECT COUNT(*) as total_chunks FROM chunks;
-SELECT doc_id, COUNT(*) as chunks FROM chunks GROUP BY doc_id;
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-### Check Neo4j
+### 4.2 Install dependencies
 
-1. Open Neo4j Browser: http://localhost:7474/
-2. Login with:
-   - Username: `neo4j`
-   - Password: `rag-neo4j-password-2024`
+```bash
+pip install -r requirements.txt
+```
 
-Run queries:
+### 4.3 Install Tesseract OCR (for scanned PDFs with Arabic)
+
+**macOS:**
+```bash
+brew install tesseract tesseract-lang
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng
+```
+
+---
+
+## Step 5: Start the Application (Option B Only)
+
+Skip this step if you're using Option A (Full Docker).
+
+```bash
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
+```
+
+You should see:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000
+INFO:     Started reloader process
+```
+
+---
+
+## Step 6: Access the System
+
+| URL | Description |
+|-----|-------------|
+| http://localhost:8000/ | Web UI (main interface) |
+| http://localhost:8000/docs | API Documentation (Swagger) |
+| http://localhost:8000/health | Health Check |
+| http://localhost:7474/ | Neo4j Browser (graph visualization) |
+
+---
+
+## Step 7: Test Document Ingestion
+
+### 7.1 Open Web UI
+
+Navigate to http://localhost:8000/
+
+### 7.2 Upload a PDF
+
+1. Click the **Upload** area or drag a PDF file
+2. Wait for the file to upload
+3. Click **Ingest Document**
+
+### 7.3 Monitor Ingestion Logs
+
+In the terminal running the server, you'll see:
+```
+[INGEST] Processing document: example.pdf
+[INGEST] Extracted 10 pages of text
+[INGEST] Page 1: Form extraction stats:
+  - Checkboxes: 5 ticked, 3 empty
+  - Table columns (| chars): 48
+[INGEST] Extracted 15 entities and 8 relationships
+[INGEST] Created 25 chunks
+[INGEST] Stored in PostgreSQL and Neo4j
+```
+
+### 7.4 Verify Ingestion Success
+
+The response will show:
+```json
+{
+  "doc_id": "example-uuid",
+  "status": "success",
+  "chunks_created": 25,
+  "entities_extracted": 15,
+  "relationships_extracted": 8
+}
+```
+
+---
+
+## Step 8: Test Queries
+
+### 8.1 Sample Test Questions
+
+Based on a handwritten safeguarding form, test these:
+
+| # | Question | Expected Answer |
+|---|----------|-----------------|
+| 1 | What is the telephone number for Middlesbrough Adult Access Team? | 01642 065070 |
+| 2 | Was an interpreter needed for this case? | No (checkbox was ticked for No) |
+| 3 | What type of abuse did the patient disclose? | Physical abuse (hitting and kicking) |
+| 4 | What is the patient's name and address? | Peter Jones, 1 The Front, Hartlepool |
+| 5 | What type of abuse was suspected according to the checkboxes? | Discriminatory |
+| 6 | Does the adult have mental capacity? | Yes |
+
+### 8.2 Test Internal Knowledge
+
+Ask a question about your ingested document. The response should include:
+- `provenance: "internal"`
+- Citations with doc_id, page_number, chunk_id
+
+### 8.3 Test Web Search Fallback
+
+Ask a question NOT in your documents (e.g., "What is the current weather?"). The response should include:
+- `provenance: "online"` or `provenance: "both"`
+- Web citations with URLs
+
+---
+
+## Step 9: Verify Data in Databases
+
+### 9.1 Check PostgreSQL
+
+```bash
+# Connect to PostgreSQL
+docker exec -it postgres-rag psql -U postgres -d rag
+
+# Count chunks
+SELECT COUNT(*) FROM chunks;
+
+# View sample chunks
+SELECT chunk_id, page_number, LEFT(text, 100) FROM chunks LIMIT 5;
+
+# Exit
+\q
+```
+
+### 9.2 Check Neo4j
+
+1. Open http://localhost:7474/
+2. Login: username `neo4j`, password `rag-neo4j-password-2024`
+3. Run queries:
+
 ```cypher
 // Count entities
-MATCH (e)
-WHERE 'Entity' IN labels(e)
-RETURN count(e) as entity_count;
+MATCH (e) WHERE 'Entity' IN labels(e) RETURN count(e);
 
-// View some entities
-MATCH (e)
-WHERE 'Entity' IN labels(e)
-RETURN e.name, e.type
-LIMIT 10;
+// View entities
+MATCH (e) WHERE 'Entity' IN labels(e) RETURN e.name, e.type LIMIT 10;
 
 // View relationships
-MATCH (e1)-[r]->(e2)
+MATCH (e1)-[r]->(e2) 
 WHERE 'Entity' IN labels(e1) AND 'Entity' IN labels(e2)
-RETURN e1.name, type(r), e2.name
-LIMIT 10;
+RETURN e1.name, type(r), e2.name LIMIT 10;
 ```
 
 ---
 
-## Step 7: Stop the System
+## Step 10: Stop the System
+
+### 10.1 Stop the Python server
+
+Press `Ctrl+C` in the terminal running uvicorn
+
+### 10.2 Stop databases
 
 ```bash
 docker-compose down
 ```
 
-To remove all data (fresh start):
+### 10.3 Remove all data (fresh start)
+
 ```bash
+# Stop and remove volumes
 docker-compose down -v
+
+# Or manually clear data without removing containers
+docker exec postgres-rag psql -U postgres -d rag -c "DELETE FROM chunks; DELETE FROM documents;"
+docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH (n) DETACH DELETE n;"
 ```
 
 ---
 
 ## Troubleshooting
 
-### Services won't start
+### Issue: AWS Bedrock Access Denied
 
-```bash
-# Check logs
-docker-compose logs
-
-# Check specific service logs
-docker-compose logs rag-api
-docker-compose logs postgres
-docker-compose logs neo4j
-
-# Restart services
-docker-compose restart
+```
+Error: AccessDeniedException
 ```
 
-### API server errors
+**Solution:**
+1. Verify AWS credentials are correct in `.env`
+2. Ensure Bedrock model access is enabled in AWS Console
+3. Check your IAM role has `bedrock:InvokeModel` permission
 
-- Verify `.env` file has correct Azure credentials
-- Check database connections are using service names (`postgres`, `neo4j`)
-- Ensure Neo4j password in `.env` matches: `rag-neo4j-password-2024`
+### Issue: Neo4j Connection Failed
 
-### Port conflicts
+```
+Error: Failed to connect to Neo4j
+```
 
-If ports 5432, 7474, 7687, or 8000 are already in use:
-- Stop conflicting services, or
-- Update port mappings in `docker-compose.yml`
+**Solution:**
+1. Verify Neo4j container is running: `docker ps`
+2. Check password matches: `rag-neo4j-password-2024`
+3. Wait for Neo4j to fully start (can take 30-60 seconds)
 
-### Neo4j authentication errors
+### Issue: Empty Document Extraction
 
-If you see "The client is unauthorized due to authentication failure":
-- Ensure `NEO4J_PASSWORD=rag-neo4j-password-2024` in your `.env` file
-- Restart the API container: `docker-compose restart rag-api`
+**Solution:**
+1. If PDF is scanned, ensure Tesseract is installed
+2. Check terminal logs for vision fallback messages
+3. Verify the PDF contains actual content (not blank)
+
+### Issue: Missing Table Columns
+
+**Solution:**
+1. Clear database and re-ingest the document
+2. Check logs for `[DOCLING TABLE]` messages
+3. Vision will automatically extract tables if Docling fails
+
+### Issue: Port Already in Use
+
+```
+Error: Address already in use
+```
+
+**Solution:**
+```bash
+# Find process using port 8000
+lsof -i :8000
+
+# Kill the process
+kill -9 <PID>
+
+# Or use a different port
+uvicorn src.api.server:app --port 8001
+```
 
 ---
 
-## Development Mode (Optional)
+## Quick Reference Commands
 
-To run only databases in Docker and Python app locally:
-
-```bash
-# Start only databases
-docker-compose -f docker-compose.dev.yml up -d
-
-# Update .env to use localhost for databases
-POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/rag
-NEO4J_URI=bolt://localhost:7687
-
-# Run Python app locally
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-```
-
----
-
-## Quick Reference
+### Option A: Full Docker
 
 ```bash
 # Start everything
@@ -257,30 +416,99 @@ docker-compose up -d
 # Check status
 docker-compose ps
 
-# View logs
+# View all logs
 docker-compose logs -f
+
+# View specific service logs
+docker-compose logs -f rag-api
 
 # Stop everything
 docker-compose down
 
-# Remove all data
+# Stop and remove all data
 docker-compose down -v
+```
 
-# Restart a specific service
-docker-compose restart rag-api
+### Option B: Local Development
+
+```bash
+# Start databases only
+docker-compose -f docker-compose.dev.yml up -d
+
+# Run Python app
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
+
+# Stop
+Ctrl+C  # Stop uvicorn
+docker-compose -f docker-compose.dev.yml down
+```
+
+### Database Operations
+
+```bash
+# Clear all data (both options)
+docker exec postgres-rag psql -U postgres -d rag -c "DELETE FROM chunks; DELETE FROM documents;"
+docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH (n) DETACH DELETE n;"
+
+# Check PostgreSQL
+docker exec postgres-rag psql -U postgres -d rag -c "SELECT COUNT(*) FROM chunks;"
+
+# Check Neo4j (open browser)
+open http://localhost:7474
 ```
 
 ---
 
 ## Summary Checklist
 
+### Prerequisites
 - [ ] Docker and Docker Compose installed
 - [ ] Repository cloned
-- [ ] `.env` file created and configured with Azure credentials
-- [ ] Database connection strings updated for Docker (service names)
-- [ ] Neo4j password set to `rag-neo4j-password-2024`
-- [ ] `docker-compose up -d` executed successfully
-- [ ] All services running and healthy
+- [ ] `.env` file created with:
+  - [ ] AWS Bedrock credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+  - [ ] SERPAPI key (SURF_API_KEY)
+
+### Option A: Full Docker
+- [ ] Run `docker-compose up -d`
+- [ ] All 3 services healthy: `docker-compose ps`
 - [ ] Web UI accessible at http://localhost:8000/
+
+### Option B: Local Development
+- [ ] Databases started: `docker-compose -f docker-compose.dev.yml up -d`
+- [ ] Python 3.9+ installed
+- [ ] Virtual environment created and activated
+- [ ] Dependencies installed: `pip install -r requirements.txt`
+- [ ] Tesseract OCR installed (for scanned PDFs)
+- [ ] Application running: `uvicorn src.api.server:app --reload`
+- [ ] Web UI accessible at http://localhost:8000/
+
+### Testing
 - [ ] Document ingested successfully
-- [ ] Query tested and working
+- [ ] Queries returning correct answers with citations
+- [ ] Web search fallback working (test with question not in documents)
+
+---
+
+## Demo Recording Checklist
+
+For your assignment demo, show:
+
+1. **Document Ingestion**
+   - Upload a scanned/handwritten PDF
+   - Show logs with extraction details
+   - Verify data in PostgreSQL and Neo4j
+
+2. **Query Internal Knowledge**
+   - Ask questions about the ingested document
+   - Show citations (doc_id, page_number, chunk_id)
+   - Show `provenance: "internal"`
+
+3. **Web Search Fallback**
+   - Ask a question not in documents
+   - Show web search being triggered
+   - Show `provenance: "online"` or `"both"`
+
+4. **Special Features** (optional)
+   - Checkbox extraction (`[TICKED]`/`[EMPTY]`)
+   - Table extraction with multiple columns
+   - Handwritten text transcription

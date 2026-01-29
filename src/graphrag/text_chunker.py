@@ -41,14 +41,16 @@ class TextChunker:
             # Calculate end position
             end = min(start + self.chunk_size, len(text))
             
-            # Try to break at sentence boundary
+            # Try to break at sentence boundary (Latin + Arabic punctuation)
             if end < len(text):
-                # Look for sentence endings
                 sentence_end = max(
                     text.rfind('.', start, end),
                     text.rfind('!', start, end),
                     text.rfind('?', start, end),
-                    text.rfind('\n', start, end)
+                    text.rfind('\n', start, end),
+                    text.rfind('\u06D4', start, end),   # Arabic full stop (۔)
+                    text.rfind('\u061B', start, end),   # Arabic semicolon (؛)
+                    text.rfind('\u061F', start, end),   # Arabic question mark (؟)
                 )
                 if sentence_end > start:
                     end = sentence_end + 1

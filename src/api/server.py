@@ -6,9 +6,15 @@ Exposes HTTP endpoints for:
 - /ingest
 - /query
 """
+import sys
+from pathlib import Path
+
+# Ensure project root is on path so "config" and "src" resolve when running uvicorn from any cwd
+_project_root = Path(__file__).resolve().parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import tempfile
-from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -19,6 +25,15 @@ from pydantic import BaseModel
 
 from src.rag_agent import RAGAgent
 import logging
+
+# Configure logging to show detailed application logs
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+# Also set specific loggers to INFO
+for log_name in ['src', 'src.rag_agent', 'src.ner', 'src.ner.entity_extractor', 'src.ingestion', '__main__']:
+    logging.getLogger(log_name).setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +60,19 @@ class Citation(BaseModel):
     similarity: Optional[float] = None
     semantic_score: Optional[float] = None
     keyword_score: Optional[float] = None
+    content_type: Optional[str] = "text"  # "text" or "image"
+    source_label: Optional[str] = None  # "Figure 1", etc. for images
+
+
+class RetrievedChunk(BaseModel):
+    chunk_id: str
+    doc_id: str
+    doc_name: Optional[str] = None
+    page_number: Optional[int] = None
+    content: Optional[str] = None
+    similarity: Optional[float] = None
+    content_type: Optional[str] = "text"
+    image_b64: Optional[str] = None  # Base64 image data for image chunks
 
 
 class WebCitation(BaseModel):
@@ -87,6 +115,7 @@ class QueryResponse(BaseModel):
     tools_satisfied: Optional[dict] = None
     sources_used: Optional[dict] = None
     decision_trace: Optional[dict] = None
+    retrieved_chunks: List[RetrievedChunk] = []  # Full chunk data including images
     retrieved_chunks_count: int
     web_results_count: int
     has_internal_knowledge: bool
@@ -140,6 +169,7 @@ def ui_root() -> FileResponse:
 async def ingest_document(
     file: UploadFile = File(...),
     doc_id: Optional[str] = Form(None),
+    pipeline_hint: Optional[str] = Form(None),
 ) -> IngestResponse:
     """
     Ingest a document via file upload.
@@ -147,6 +177,7 @@ async def ingest_document(
     The file is temporarily saved to disk, passed to the RAGAgent,
     and then removed.
     
+    pipeline_hint: optional. Default "auto" - Arabic and handwritten/scanned are auto-detected; no need to pass.
     Supports deduplication - re-ingesting the same document will be skipped.
     """
     if agent is None:
@@ -166,8 +197,10 @@ async def ingest_document(
         tmp_path = tmp.name
 
     try:
-        logger.info(f"Ingesting document: {file.filename}")
-        result = agent.ingest_document(tmp_path, doc_id=doc_id, source_name=file.filename)
+        logger.info(f"Ingesting document: {file.filename} (pipeline_hint={pipeline_hint})")
+        result = agent.ingest_document(
+            tmp_path, doc_id=doc_id, source_name=file.filename, pipeline_hint=pipeline_hint
+        )
         
         status = result.get("status", "unknown")
         
@@ -247,6 +280,22 @@ def query_rag(request: QueryRequest) -> QueryResponse:
                 similarity=cit.get("similarity"),
                 semantic_score=cit.get("semantic_score"),
                 keyword_score=cit.get("keyword_score"),
+                content_type=cit.get("content_type", "text"),
+                source_label=cit.get("source_label"),
+            ))
+
+        # Format retrieved chunks (including image data for frontend display)
+        retrieved_chunks = []
+        for chunk in result.get("retrieved_chunks", []):
+            retrieved_chunks.append(RetrievedChunk(
+                chunk_id=chunk.get("chunk_id", "unknown"),
+                doc_id=chunk.get("doc_id", "unknown"),
+                doc_name=chunk.get("doc_name"),
+                page_number=chunk.get("page_number"),
+                content=chunk.get("content"),
+                similarity=chunk.get("similarity"),
+                content_type=chunk.get("content_type", "text"),
+                image_b64=chunk.get("image_b64"),  # Include image data
             ))
 
         return QueryResponse(
@@ -259,7 +308,8 @@ def query_rag(request: QueryRequest) -> QueryResponse:
             tools_satisfied=result.get("tools_satisfied"),
             sources_used=result.get("sources_used"),
             decision_trace=result.get("decision_trace"),
-            retrieved_chunks_count=len(result.get("retrieved_chunks", [])),
+            retrieved_chunks=retrieved_chunks,
+            retrieved_chunks_count=len(retrieved_chunks),
             web_results_count=len(result.get("web_results", [])),
             has_internal_knowledge=result.get("has_internal_knowledge", False),
             internal_sufficient=result.get("internal_sufficient", False),

@@ -1,5 +1,24 @@
-# Docker Compose for development: Only databases, run Python app locally
-version: '3.8'
+# ============================================
+# RAG AI Agent - Development Docker Compose
+# ============================================
+# This file runs ONLY the databases for local development.
+# Use this when you want to run the Python app locally with hot-reload.
+#
+# Usage:
+#   1. Start databases:
+#      docker-compose -f docker-compose.dev.yml up -d
+#
+#   2. Run Python app locally:
+#      pip install -r requirements.txt
+#      uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
+#
+#   3. Stop databases:
+#      docker-compose -f docker-compose.dev.yml down
+#
+# NOTE: For local development, your .env should use localhost:
+#   POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/rag
+#   NEO4J_URI=bolt://localhost:7687
+# ============================================
 
 services:
   # PostgreSQL with pgvector extension
@@ -19,28 +38,34 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   # Neo4j Graph Database
   neo4j:
-    image: neo4j:latest
+    image: neo4j:5
     container_name: neo4j-rag
     environment:
       NEO4J_AUTH: neo4j/rag-neo4j-password-2024
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_memory_heap_max__size: 2G
     ports:
-      - "7474:7474"  # HTTP
-      - "7687:7687"  # Bolt
+      - "7474:7474"  # HTTP (Neo4j Browser)
+      - "7687:7687"  # Bolt protocol
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
     healthcheck:
       test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "rag-neo4j-password-2024", "RETURN 1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+    name: rag-postgres-data
   neo4j_data:
+    name: rag-neo4j-data
   neo4j_logs:
+    name: rag-neo4j-logs

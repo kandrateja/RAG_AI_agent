@@ -4,9 +4,27 @@ Neo4j Client for GraphRAG
 from neo4j import GraphDatabase
 from typing import List, Dict, Optional, Any
 import logging
-import numpy as np
+import re
+import json
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_label(label: str) -> str:
+    """
+    Sanitize a string to be used as a Neo4j label or relationship type.
+    Neo4j labels cannot have spaces or special characters (except underscore).
+    """
+    if not label:
+        return "Unknown"
+    # Replace spaces and hyphens with underscores
+    sanitized = re.sub(r'[\s\-]+', '_', label.strip())
+    # Remove any other non-alphanumeric characters (except underscore)
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '', sanitized)
+    # Ensure it doesn't start with a number
+    if sanitized and sanitized[0].isdigit():
+        sanitized = '_' + sanitized
+    return sanitized or "Unknown"
 
 
 class Neo4jClient:
@@ -31,97 +49,110 @@ class Neo4jClient:
         try:
             with self.driver.session(database=self.database) as session:
                 session.run("RETURN 1")
-            logger.info("Successfully connected to Neo4j")
+            logger.info("Neo4j connection verified")
         except Exception as e:
             logger.error(f"Failed to connect to Neo4j: {str(e)}")
             raise
     
+    def close(self):
+        """Close the Neo4j driver connection"""
+        if self.driver:
+            self.driver.close()
+            logger.info("Neo4j connection closed")
+
     def create_node(
         self,
         label: str,
         properties: Dict[str, Any],
         node_id: Optional[str] = None
-    ) -> int:
+    ) -> str:
         """
-        Create a node in Neo4j
-        
-        Args:
-            label: Node label
-            properties: Node properties dictionary
-            node_id: Optional custom node ID (stored as property, not Neo4j internal ID)
-            
-        Returns:
-            Created node internal ID (integer)
+        Create a node in Neo4j using MERGE to avoid duplicates.
+        Returns the elementId of the node.
         """
+        safe_label = _sanitize_label(label)
         with self.driver.session(database=self.database) as session:
             if node_id:
                 properties["id"] = node_id
             
-            query = f"""
-            CREATE (n:{label} $properties)
-            RETURN id(n) as node_id
-            """
-            result = session.run(query, properties=properties)
+            # Use MERGE to avoid duplicates when we have an id
+            if node_id:
+                query = f"""
+                MERGE (n:{safe_label} {{id: $node_id}})
+                SET n += $properties
+                RETURN elementId(n) as node_id
+                """
+                result = session.run(query, node_id=node_id, properties=properties)
+            else:
+                query = f"""
+                CREATE (n:{safe_label} $properties)
+                RETURN elementId(n) as node_id
+                """
+                result = session.run(query, properties=properties)
             return result.single()["node_id"]
     
     def create_relationship(
         self,
-        from_node_id: int,
-        to_node_id: int,
+        from_node_id: str,
+        to_node_id: str,
         rel_type: str,
         properties: Optional[Dict[str, Any]] = None
     ):
         """
-        Create a relationship between nodes
-        
-        Args:
-            from_node_id: Source node ID
-            to_node_id: Target node ID
-            rel_type: Relationship type
-            properties: Optional relationship properties
+        Create a relationship between nodes using elementId.
         """
+        safe_rel_type = _sanitize_label(rel_type)
+        
         with self.driver.session(database=self.database) as session:
             if properties:
-                query = """
+                query = f"""
                 MATCH (a), (b)
-                WHERE id(a) = $from_id AND id(b) = $to_id
-                CREATE (a)-[r:%s $properties]->(b)
+                WHERE elementId(a) = $from_id AND elementId(b) = $to_id
+                MERGE (a)-[r:{safe_rel_type}]->(b)
+                SET r += $props
                 RETURN r
-                """ % rel_type
-                session.run(query, from_id=from_node_id, to_id=to_node_id, properties=properties)
+                """
+                session.run(query, from_id=from_node_id, to_id=to_node_id, props=properties)
             else:
-                query = """
+                query = f"""
                 MATCH (a), (b)
-                WHERE id(a) = $from_id AND id(b) = $to_id
-                CREATE (a)-[r:%s]->(b)
+                WHERE elementId(a) = $from_id AND elementId(b) = $to_id
+                MERGE (a)-[r:{safe_rel_type}]->(b)
                 RETURN r
-                """ % rel_type
+                """
                 session.run(query, from_id=from_node_id, to_id=to_node_id)
-    
-    def create_document_node(self, doc_id: str, content: str, metadata: Optional[Dict] = None) -> int:
-        """
-        Create a document node
-        
-        Args:
-            doc_id: Document identifier
-            content: Document content
-            metadata: Optional metadata dictionary
-            
-        Returns:
-            Created node internal ID (integer)
-        """
-        properties = {
-            "doc_id": doc_id,
-            "content": content,
-            **(metadata or {})
-        }
-        return self.create_node("Document", properties, node_id=doc_id)
 
-    def upsert_chunk_ref(self, chunk_id: str, doc_id: str, page_number: Optional[int] = None) -> int:
+    def upsert_document_node(self, doc_id: str, source_path: Optional[str] = None) -> None:
+        """
+        Create or update a Document node in Neo4j.
+        """
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MERGE (d:Document {doc_id: $doc_id})
+                ON CREATE SET d.source_path = $source_path
+                ON MATCH SET d.source_path = $source_path
+                """,
+                doc_id=doc_id,
+                source_path=source_path or "",
+            )
+
+    def link_chunk_ref_to_document(self, chunk_id: str, doc_id: str) -> None:
+        """Create (ChunkRef)-[:BELONGS_TO]->(Document)"""
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MATCH (c:ChunkRef {chunk_id: $chunk_id})
+                MATCH (d:Document {doc_id: $doc_id})
+                MERGE (c)-[:BELONGS_TO]->(d)
+                """,
+                chunk_id=chunk_id,
+                doc_id=doc_id,
+            )
+
+    def upsert_chunk_ref(self, chunk_id: str, doc_id: str, page_number: Optional[int] = None) -> str:
         """
         Create a lightweight ChunkRef node used for graph-time joins back to the vector DB.
-
-        We do NOT store embeddings here (those live in Postgres/pgvector).
         """
         properties: Dict[str, Any] = {"chunk_id": chunk_id, "doc_id": doc_id}
         if page_number is not None:
@@ -142,6 +173,25 @@ class Neo4jClient:
                 entity_id=entity_id,
             )
 
+    def _ensure_mentions_type_exists(self) -> None:
+        """
+        Ensure the MENTIONS relationship type exists in the DB so Cypher queries
+        don't raise UnknownRelationshipTypeWarning when no entities were linked yet.
+        """
+        with self.driver.session(database=self.database) as session:
+            r = session.run("MATCH ()-[r:MENTIONS]->() RETURN count(r) AS c")
+            row = r.single()
+            if row and row["c"] and row["c"] > 0:
+                return
+            session.run(
+                """
+                MERGE (c:ChunkRef {chunk_id: '__sentinel_mentions__', doc_id: '__sentinel__'})
+                MERGE (e:Entity {entity_id: '__sentinel_mentions__', name: '', type: 'Unknown'})
+                MERGE (c)-[:MENTIONS]->(e)
+                """
+            )
+            logger.debug("Created sentinel MENTIONS relationship")
+
     def expand_graph_context(self, chunk_ids: List[str], max_entities: int = 20) -> Dict[str, Any]:
         """
         Given seed chunk_ids (from pgvector retrieval), return entities mentioned and their relationships.
@@ -150,6 +200,8 @@ class Neo4jClient:
         relationships: List[Dict[str, Any]] = []
         if not chunk_ids:
             return {"entities": entities, "relationships": relationships}
+
+        self._ensure_mentions_type_exists()
 
         with self.driver.session(database=self.database) as session:
             ent_res = session.run(
@@ -163,6 +215,8 @@ class Neo4jClient:
                 limit=max_entities,
             )
             for r in ent_res:
+                if r["entity_id"] == "__sentinel_mentions__":
+                    continue
                 entities.append({"entity_id": r["entity_id"], "name": r["name"], "type": r["type"]})
 
             rel_res = session.run(
@@ -185,6 +239,7 @@ class Neo4jClient:
         """
         if not chunk_ids:
             return []
+        self._ensure_mentions_type_exists()
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
@@ -194,361 +249,83 @@ class Neo4jClient:
                 """,
                 chunk_ids=chunk_ids,
             )
-            return [r["chunk_id"] for r in result]
-    
-    def create_chunk_node(
+            return [r["chunk_id"] for r in result if r["chunk_id"] != "__sentinel_mentions__"]
+
+    def create_entity_node(
         self,
-        chunk_id: str,
-        content: str,
-        embedding: List[float],
-        doc_id: str,
-        chunk_index: int,
-        page_number: Optional[int] = None,
-        metadata: Optional[Dict] = None
-    ) -> int:
+        entity_id: str,
+        entity_type: str,
+        name: str,
+        properties: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
-        Create a chunk node with embedding
-        
-        Args:
-            chunk_id: Chunk identifier
-            content: Chunk content
-            embedding: Chunk embedding vector
-            doc_id: Parent document ID
-            chunk_index: Index of chunk in document
-            page_number: Optional page number
-            metadata: Optional metadata dictionary
+        Create an Entity node with a specific type label.
         """
-        properties = {
-            "chunk_id": chunk_id,
-            "content": content,
-            "embedding": embedding,
-            "doc_id": doc_id,
-            "chunk_index": chunk_index,
-            **(metadata or {})
-        }
-        if page_number is not None:
-            properties["page_number"] = page_number
-        
-        node_id = self.create_node("Chunk", properties, node_id=chunk_id)
-        
-        # Create relationship to parent document
-        doc_node = self.get_node_by_property("Document", "doc_id", doc_id)
-        if doc_node:
-            self.create_relationship(node_id, doc_node["id"], "BELONGS_TO")
-        
-        return node_id
-    
-    def get_node_by_property(self, label: str, property_key: str, property_value: Any) -> Optional[Dict]:
-        """
-        Get a node by property
-        
-        Args:
-            label: Node label
-            property_key: Property key to search
-            property_value: Property value to match
-            
-        Returns:
-            Node dictionary or None
-        """
-        with self.driver.session(database=self.database) as session:
-            query = f"""
-            MATCH (n:{label})
-            WHERE n.{property_key} = $value
-            RETURN n, id(n) as id
-            LIMIT 1
-            """
-            result = session.run(query, value=property_value)
-            record = result.single()
-            if record:
-                return {"id": record["id"], **dict(record["n"])}
-            return None
-    
-    def document_exists(self, doc_id: str) -> bool:
-        """
-        Check if a document with the given doc_id already exists
-        
-        Args:
-            doc_id: Document identifier
-            
-        Returns:
-            True if document exists, False otherwise
-        """
-        doc_node = self.get_node_by_property("Document", "doc_id", doc_id)
-        return doc_node is not None
-    
-    def get_chunk_metadata(self, chunk_id: str) -> Optional[Dict]:
-        """
-        Get full metadata for a chunk including page_number
-        
-        Args:
-            chunk_id: Chunk identifier
-            
-        Returns:
-            Chunk metadata dictionary or None
-        """
-        with self.driver.session(database=self.database) as session:
-            query = """
-            MATCH (c:Chunk {chunk_id: $chunk_id})
-            RETURN c
-            LIMIT 1
-            """
-            result = session.run(query, chunk_id=chunk_id)
-            record = result.single()
-            if record:
-                return dict(record["c"])
-            return None
-    
-    def vector_search(
-        self,
-        query_embedding: List[float],
-        top_k: int = 5,
-        threshold: float = 0.7
-    ) -> List[Dict]:
-        """
-        Perform vector similarity search using cosine similarity
-        
-        Args:
-            query_embedding: Query embedding vector
-            top_k: Number of results to return
-            threshold: Similarity threshold
-            
-        Returns:
-            List of matching chunks with similarity scores
-        """
-        with self.driver.session(database=self.database) as session:
-            # Create index if it doesn't exist
-            self._create_vector_index(session)
-            
-            query = """
-            MATCH (c:Chunk)
-            WHERE c.embedding IS NOT NULL
-            WITH c, 
-                 gds.similarity.cosine(c.embedding, $query_embedding) AS similarity
-            WHERE similarity >= $threshold
-            RETURN c.content AS content, 
-                   c.chunk_id AS chunk_id,
-                   c.doc_id AS doc_id,
-                   c.page_number AS page_number,
-                   similarity
-            ORDER BY similarity DESC
-            LIMIT $top_k
-            """
-            
-            try:
-                result = session.run(
-                    query,
-                    query_embedding=query_embedding,
-                    threshold=threshold,
-                    top_k=top_k
-                )
-                return [
-                    {
-                        "content": record["content"],
-                        "chunk_id": record["chunk_id"],
-                        "doc_id": record["doc_id"],
-                        "page_number": record.get("page_number"),
-                        "similarity": record["similarity"]
-                    }
-                    for record in result
-                ]
-            except Exception as e:
-                # Fallback to manual cosine similarity if GDS is not available
-                logger.warning(f"GDS similarity not available, using manual calculation: {str(e)}")
-                return self._manual_vector_search(session, query_embedding, top_k, threshold)
-    
-    def _manual_vector_search(
-        self,
-        session,
-        query_embedding: List[float],
-        top_k: int,
-        threshold: float
-    ) -> List[Dict]:
-        """Manual vector search using Python cosine similarity"""
-        
-        query = """
-        MATCH (c:Chunk)
-        WHERE c.embedding IS NOT NULL
-        RETURN c.content AS content,
-               c.chunk_id AS chunk_id,
-               c.doc_id AS doc_id,
-               c.page_number AS page_number,
-               c.embedding AS embedding
-        """
-        
-        results = session.run(query)
-        similarities = []
-        
-        query_vec = np.array(query_embedding)
-        query_norm = np.linalg.norm(query_vec)
-        
-        for record in results:
-            chunk_embedding = np.array(record["embedding"])
-            chunk_norm = np.linalg.norm(chunk_embedding)
-            
-            if query_norm > 0 and chunk_norm > 0:
-                similarity = np.dot(query_vec, chunk_embedding) / (query_norm * chunk_norm)
-                if similarity >= threshold:
-                    similarities.append({
-                        "content": record["content"],
-                        "chunk_id": record["chunk_id"],
-                        "doc_id": record["doc_id"],
-                        "page_number": record.get("page_number"),
-                        "similarity": float(similarity)
-                    })
-        
-        # Sort by similarity and return top_k
-        similarities.sort(key=lambda x: x["similarity"], reverse=True)
-        return similarities[:top_k]
-    
-    def _create_vector_index(self, session):
-        """Create vector index for embeddings if it doesn't exist"""
-        try:
-            # Try to create index using Neo4j Vector Index (if available)
-            index_query = """
-            CREATE INDEX chunk_embedding_index IF NOT EXISTS
-            FOR (c:Chunk) ON (c.embedding)
-            """
-            session.run(index_query)
-        except Exception as e:
-            logger.debug(f"Vector index creation skipped: {str(e)}")
-    
-    def create_entity_node(self, entity_id: str, entity_type: str, name: str, properties: Optional[Dict] = None):
-        """
-        Create an entity node for GraphRAG
-        
-        Args:
-            entity_id: Entity identifier
-            entity_type: Type of entity (e.g., Person, Organization, Concept)
-            name: Entity name
-            properties: Optional additional properties
-        """
+        safe_type = _sanitize_label(entity_type)
         props = {
             "entity_id": entity_id,
             "name": name,
             "type": entity_type,
             **(properties or {})
         }
-        # Create node with Entity label and type stored as property
-        # Neo4j supports multiple labels, so we use Entity as base label
+        
         with self.driver.session(database=self.database) as session:
-            if entity_id:
-                props["id"] = entity_id
-            
-            # Create with Entity label (can add specific type as second label if needed)
             query = f"""
-            CREATE (n:Entity:{entity_type} $properties)
-            RETURN id(n) as node_id
+            MERGE (e:Entity:{safe_type} {{entity_id: $entity_id}})
+            SET e += $props
+            RETURN elementId(e) as node_id
             """
-            result = session.run(query, properties=props)
+            result = session.run(query, entity_id=entity_id, props=props)
             return result.single()["node_id"]
-    
+
     def create_entity_relationship(
         self,
         from_entity_id: str,
         to_entity_id: str,
         rel_type: str,
-        properties: Optional[Dict] = None
-    ):
+        properties: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
-        Create relationship between entities
-        
-        Args:
-            from_entity_id: Source entity ID
-            to_entity_id: Target entity ID
-            rel_type: Relationship type
-            properties: Optional relationship properties
+        Create a relationship between two Entity nodes by entity_id.
         """
-        # Search for entities by entity_id (works with any Entity label)
-        with self.driver.session(database=self.database) as session:
-            query = """
-            MATCH (e)
-            WHERE e.entity_id = $entity_id AND 'Entity' IN labels(e)
-            RETURN e, id(e) as id
-            LIMIT 1
-            """
-            from_result = session.run(query, entity_id=from_entity_id)
-            to_result = session.run(query, entity_id=to_entity_id)
-            
-            from_record = from_result.single()
-            to_record = to_result.single()
-            
-            if from_record and to_record:
-                self.create_relationship(from_record["id"], to_record["id"], rel_type, properties)
-    
-    def graph_rag_query(
-        self,
-        query: str,
-        query_embedding: List[float],
-        top_k: int = 5,
-        include_relationships: bool = True
-    ) -> Dict:
-        """
-        Perform GraphRAG query combining vector search with graph traversal
-        
-        Args:
-            query: Natural language query
-            query_embedding: Query embedding vector
-            top_k: Number of initial chunks to retrieve
-            include_relationships: Whether to include related entities
-            
-        Returns:
-            Dictionary with relevant chunks and graph context
-        """
-        # Initial vector search
-        initial_results = self.vector_search(query_embedding, top_k=top_k)
-        
-        if not include_relationships:
-            return {"chunks": initial_results, "entities": [], "relationships": []}
-        
-        # Extract document IDs from results
-        doc_ids = list(set([r["doc_id"] for r in initial_results]))
-        
-        # Get related entities and relationships
-        entities = []
-        relationships = []
+        safe_rel_type = _sanitize_label(rel_type)
         
         with self.driver.session(database=self.database) as session:
-            # Find entities mentioned in the retrieved chunks
-            for doc_id in doc_ids:
-                entity_query = """
-                MATCH (d:Document {doc_id: $doc_id})<-[:BELONGS_TO]-(c:Chunk)
-                MATCH (c)-[:MENTIONS]->(e:Entity)
-                RETURN DISTINCT e.entity_id AS entity_id,
-                               e.name AS name,
-                               e.type AS type
-                LIMIT 10
+            if properties:
+                query = f"""
+                MATCH (a), (b)
+                WHERE a.entity_id = $from_id AND 'Entity' IN labels(a)
+                  AND b.entity_id = $to_id AND 'Entity' IN labels(b)
+                MERGE (a)-[r:{safe_rel_type}]->(b)
+                SET r += $props
                 """
-                result = session.run(entity_query, doc_id=doc_id)
-                for record in result:
-                    entities.append({
-                        "entity_id": record["entity_id"],
-                        "name": record["name"],
-                        "type": record["type"]
-                    })
-                
-                # Get relationships between entities
-                rel_query = """
-                MATCH (d:Document {doc_id: $doc_id})<-[:BELONGS_TO]-(c:Chunk)
-                MATCH (c)-[:MENTIONS]->(e1:Entity)-[r]->(e2:Entity)
-                RETURN DISTINCT e1.name AS from_entity,
-                               type(r) AS rel_type,
-                               e2.name AS to_entity
-                LIMIT 20
+                session.run(query, from_id=from_entity_id, to_id=to_entity_id, props=properties)
+            else:
+                query = f"""
+                MATCH (a), (b)
+                WHERE a.entity_id = $from_id AND 'Entity' IN labels(a)
+                  AND b.entity_id = $to_id AND 'Entity' IN labels(b)
+                MERGE (a)-[r:{safe_rel_type}]->(b)
                 """
-                result = session.run(rel_query, doc_id=doc_id)
-                for record in result:
-                    relationships.append({
-                        "from": record["from_entity"],
-                        "type": record["rel_type"],
-                        "to": record["to_entity"]
-                    })
-        
-        return {
-            "chunks": initial_results,
-            "entities": entities,
-            "relationships": relationships
-        }
-    
-    def close(self):
-        """Close the Neo4j driver connection"""
-        self.driver.close()
+                session.run(query, from_id=from_entity_id, to_id=to_entity_id)
+
+    def get_node_by_property(self, label: str, prop_name: str, prop_value: Any) -> Optional[Dict]:
+        """
+        Get a node by a property value.
+        """
+        safe_label = _sanitize_label(label)
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                f"""
+                MATCH (n:{safe_label} {{{prop_name}: $value}})
+                RETURN n, elementId(n) as id
+                LIMIT 1
+                """,
+                value=prop_value,
+            )
+            record = result.single()
+            if record:
+                node = dict(record["n"])
+                node["id"] = record["id"]
+                return node
+            return None
