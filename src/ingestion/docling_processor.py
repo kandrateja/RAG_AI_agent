@@ -645,6 +645,67 @@ class DoclingProcessor:
             logger.error(f"Error extracting embedded images: {e}")
             return []
 
+    def get_pages_with_images(
+        self,
+        document_path: str,
+        min_content_size: int = 120,
+    ) -> List[int]:
+        """
+        Detect which pages in the PDF contain meaningful images (diagrams, figures, photos).
+        Returns a list of 1-indexed page numbers that have content-sized images.
+        
+        This is used to determine which pages need multimodal (image) embedding
+        in addition to text embedding for the hybrid approach.
+        
+        Args:
+            document_path: Path to the PDF file
+            min_content_size: Minimum width/height to consider an image as content (not icon/logo)
+        
+        Returns:
+            List of page numbers (1-indexed) that contain meaningful images
+        """
+        pages_with_images: List[int] = []
+        try:
+            import fitz
+            doc = fitz.open(document_path)
+            
+            for page_idx, page in enumerate(doc):
+                page_images = page.get_images(full=True)
+                has_content_image = False
+                
+                for img_info in page_images:
+                    xref = img_info[0]
+                    try:
+                        # Get image position and size on page
+                        img_rects = page.get_image_rects(xref)
+                        if not img_rects:
+                            continue
+                        
+                        width = img_rects[0].width
+                        height = img_rects[0].height
+                        
+                        # Skip tiny images (icons, bullets, logos)
+                        if width < 50 or height < 50:
+                            continue
+                        if width < min_content_size or height < min_content_size:
+                            continue
+                        
+                        # Found a content-sized image on this page
+                        has_content_image = True
+                        break
+                    except Exception:
+                        continue
+                
+                if has_content_image:
+                    pages_with_images.append(page_idx + 1)  # 1-indexed
+            
+            doc.close()
+            logger.info(f"[Docling] Pages with content images: {pages_with_images or 'none'}")
+            return pages_with_images
+        except Exception as e:
+            logger.error(f"Error detecting pages with images: {e}")
+            return []
+
     def extract_figures_with_docling(
         self,
         document_path: str,

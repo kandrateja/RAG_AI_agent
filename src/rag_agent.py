@@ -245,7 +245,6 @@ class RAGAgent:
                 print(f"[INGEST] Handwritten document detected ({total_extracted_text} chars from OCR). Will extract entities after vision processing.")
 
             # Step 3: Vision for handwritten/scanned documents. Text-only docs: skip images.
-            page_captions: Dict[int, str] = {}
             min_chars = getattr(settings, "ingestion_vision_fallback_min_chars", 50)
             
             # Detect if this is an Arabic text document - skip ALL vision/image processing for it
@@ -279,10 +278,27 @@ class RAGAgent:
                 use_vision_fallback = False
                 all_pages_text_heavy = True  # Force skip
             
+            # HYBRID APPROACH: Detect "text+image" documents (normal PDFs with text AND images)
+            # These are NOT handwritten, NOT Arabic, but have embedded images/figures
+            # For these: use Docling text extraction + page-level multimodal image embeddings
+            is_text_image_document = False
+            pages_with_images: List[int] = []
+            if not is_handwritten and not is_arabic_doc and self.use_titan_embeddings:
+                pages_with_images = self.doc_processor.get_pages_with_images(document_path)
+                if pages_with_images:
+                    is_text_image_document = True
+                    logger.info(f"[INGEST] TEXT+IMAGE document detected - pages with images: {pages_with_images}")
+                    print(f"[INGEST] Text+Image document detected. Using HYBRID approach:")
+                    print(f"         - Text extraction via Docling → text embeddings")
+                    print(f"         - Pages {pages_with_images} rendered as images → multimodal image embeddings")
+                    # For text+image docs: skip vision extraction, use page-level image embedding instead
+                    use_vision_fallback = False
+                    all_pages_text_heavy = True  # Skip vision block
+            
             # Skip Step 3 entirely for text-only docs (e.g. 10-page Arabic): extract text only, no page-as-image
             if use_vision_fallback or not all_pages_text_heavy:
                 try:
-                    logger.info("[INGEST] Extracting page images for vision captions / fallback")
+                    logger.info("[INGEST] Extracting page images for vision text extraction (handwritten/scanned)")
                     page_images = self.doc_processor.extract_page_images(document_path)
                     logger.info(f"[INGEST] Found {len(page_images)} page images")
                     for page in page_images:
@@ -394,37 +410,23 @@ class RAGAgent:
                                         
                                         logger.info(f"[INGEST] Page {page_idx}: Form extraction - {ticked_count} ticked, {empty_count} empty, {blank_count} blank, {table_count} table pipes")
                                         
-                                        page_captions[page_idx] = f"[Form data - Vision extracted]\n{vision_text.strip()}"
+                                        # Replace OCR text with vision-extracted text
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
-                                                p["text"] = vision_text.strip()  # Replace, don't append
+                                                p["text"] = vision_text.strip()
                                                 break
                                         print(f"[INGEST] Page {page_idx}: Vision extracted {len(vision_text)} chars of form data")
                                     else:
-                                        page_captions[page_idx] = f"[Vision-extracted text]\n{vision_text.strip()}"
+                                        # Append vision-extracted text to existing text
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
                                                 p["text"] = (p.get("text", "") + "\n\n" + vision_text.strip()).strip()
                                                 break
                             except Exception as ve:
                                 logger.warning(f"[INGEST] Vision fallback failed for page {page_idx}: {ve}")
-                        # Only ask "describe diagram" for pages with very little text (likely a figure page)
-                        elif page_text_len < min_text_for_text_page:
-                            caption = self.llm_client.chat_completion_with_image(
-                                prompt=(
-                                    "Describe the diagram or visual content on this page. "
-                                    "If there is no meaningful diagram, respond with 'No diagram detected.'"
-                                ),
-                                image_base64=image_b64,
-                                media_type=media_type,
-                                max_completion_tokens=256,
-                            )
-                            if caption and "no diagram detected" not in caption.lower():
-                                page_captions[page_idx] = caption.strip()
-                    if page_captions:
-                        logger.info(f"[INGEST] Generated {len(page_captions)} image captions")
+                        # NOTE: Caption generation removed - using multimodal page embeddings instead
                 except Exception as e:
-                    logger.warning(f"[INGEST] Vision captioning skipped: {str(e)}")
+                    logger.warning(f"[INGEST] Vision extraction skipped: {str(e)}")
             else:
                 logger.info("[INGEST] Text-only document (all pages have substantial text); skipping page-as-image and vision")
 
@@ -452,53 +454,67 @@ class RAGAgent:
                 else:
                     print(f"[INGEST] Not enough text for entity extraction: {len(full_text)} chars")
 
-            # Step 3b: Extract embedded images for multimodal embedding (if using Titan)
-            # SKIP entirely for text-only documents (e.g. Arabic PDF): no vision, no image detection/extraction
-            # Also skip for handwritten (we already have page images as captions)
+            # Step 3b: Extract images for multimodal embedding (if using Titan)
+            # 
+            # ROUTING LOGIC:
+            # - TEXT+IMAGE docs: Render FULL PAGES that have images → page-level image embeddings
+            # - Arabic docs: SKIP all image processing (text-only)
+            # - Handwritten docs: SKIP (vision extraction already done, text embeddings only)
+            # - Other docs: Legacy behavior (extract embedded images only)
+            #
             embedded_images: List[Dict] = []
             avg_text_per_page = sum(len((p.get("text") or "").strip()) for p in pages) / len(pages) if pages else 0
-            is_text_document = all_pages_text_heavy or is_arabic_doc or (avg_text_per_page > 200 and len(pages) > 3) or is_handwritten
             
-            if self.use_titan_embeddings and not is_text_document:
+            if self.use_titan_embeddings and is_text_image_document and pages_with_images:
+                # HYBRID APPROACH: Render pages with images as full page images
+                # This captures both the text layout AND the image content together
                 try:
-                    logger.info("[INGEST] Extracting embedded images (diagrams, figures)")
-                    embedded_images = self.doc_processor.extract_embedded_images(document_path)
-                    logger.info(f"[INGEST] Found {len(embedded_images)} embedded images")
-                    
-                    # FALLBACK: Only when no embedded images AND some pages have very little text (likely diagram pages).
-                    # Do NOT treat text-only pages as images (e.g. 10-page Arabic doc: extract text only).
-                    if not embedded_images:
-                        # Only consider a page a "figure" page if it has very little text (likely a diagram, not body text)
-                        min_text_to_be_diagram_page = 200
-                        figure_pages = {
-                            p.get("page_number")
-                            for p in pages
-                            if len((p.get("text") or "").strip()) < min_text_to_be_diagram_page
-                        }
-                        if figure_pages:
-                            logger.info(f"[INGEST] Low-text pages treated as potential figures: {sorted(figure_pages)}")
-                            page_images = self.doc_processor.extract_page_images(
-                                document_path,
-                                page_numbers=sorted(figure_pages),
-                                dpi=150,
-                            )
-                            embedded_images = page_images
-                            logger.info(f"[INGEST] Rendered {len(embedded_images)} page images for figure fallback")
-                        else:
-                            logger.info("[INGEST] No embedded images and no low-text pages; document treated as text-only (no page images stored)")
-                        
+                    logger.info(f"[INGEST] TEXT+IMAGE: Rendering {len(pages_with_images)} pages as full images for multimodal embedding")
+                    print(f"[INGEST] Rendering pages {pages_with_images} as full page images...")
+                    embedded_images = self.doc_processor.extract_page_images(
+                        document_path,
+                        page_numbers=pages_with_images,
+                        dpi=150,  # Good balance of quality and size
+                    )
+                    logger.info(f"[INGEST] Rendered {len(embedded_images)} page images for multimodal embedding")
+                    print(f"[INGEST] Created {len(embedded_images)} page images for embedding")
                 except Exception as e:
-                    logger.warning(f"[INGEST] Image extraction failed: {e}")
-            elif self.use_titan_embeddings and is_text_document:
-                if is_handwritten:
-                    reason = "handwritten (pages already processed via vision)"
-                elif is_arabic_doc:
-                    reason = "Arabic document"
-                elif all_pages_text_heavy:
-                    reason = "all pages text-heavy"
+                    logger.warning(f"[INGEST] Page image extraction failed: {e}")
+                    print(f"[INGEST] Warning: Could not render page images: {e}")
+            elif self.use_titan_embeddings and is_arabic_doc:
+                logger.info("[INGEST] Arabic document: skipping image extraction (text-only)")
+            elif self.use_titan_embeddings and is_handwritten:
+                logger.info("[INGEST] Handwritten document: skipping image extraction (vision text extraction already done)")
+            elif self.use_titan_embeddings:
+                # Legacy fallback: extract embedded images for other document types
+                is_text_document = all_pages_text_heavy or (avg_text_per_page > 200 and len(pages) > 3)
+                if not is_text_document:
+                    try:
+                        logger.info("[INGEST] Extracting embedded images (diagrams, figures)")
+                        embedded_images = self.doc_processor.extract_embedded_images(document_path)
+                        logger.info(f"[INGEST] Found {len(embedded_images)} embedded images")
+                        
+                        # FALLBACK: Only when no embedded images AND some pages have very little text
+                        if not embedded_images:
+                            min_text_to_be_diagram_page = 200
+                            figure_pages = {
+                                p.get("page_number")
+                                for p in pages
+                                if len((p.get("text") or "").strip()) < min_text_to_be_diagram_page
+                            }
+                            if figure_pages:
+                                logger.info(f"[INGEST] Low-text pages treated as potential figures: {sorted(figure_pages)}")
+                                page_images = self.doc_processor.extract_page_images(
+                                    document_path,
+                                    page_numbers=sorted(figure_pages),
+                                    dpi=150,
+                                )
+                                embedded_images = page_images
+                                logger.info(f"[INGEST] Rendered {len(embedded_images)} page images for figure fallback")
+                    except Exception as e:
+                        logger.warning(f"[INGEST] Image extraction failed: {e}")
                 else:
-                    reason = f"avg {avg_text_per_page:.0f} chars/page"
-                logger.info(f"[INGEST] Text-only document ({reason}): skipping embedded image extraction (no vision, no image detection)")
+                    logger.info(f"[INGEST] Text-heavy document (avg {avg_text_per_page:.0f} chars/page): skipping image extraction")
 
             # Step 4: Chunk the text with page information
             logger.info("[INGEST] Chunking document text")
@@ -517,20 +533,8 @@ class RAGAgent:
                 print("[INGEST] Form document detected - using larger chunks (2000 chars) to keep form fields together")
             
             if pages:
-                # Merge page-level captions into page text (skip placeholder-only captions like "Image 1")
-                if page_captions:
-                    for page in pages:
-                        page_number = int(page.get("page_number", 0) or 0)
-                        caption = page_captions.get(page_number)
-                        if caption:
-                            caption_clean = (caption or "").strip()
-                            # Do not replace/append if caption is just placeholder (e.g. "Image 1", "Image one")
-                            if caption_clean and not re.match(
-                                r"^(image\s*(one|two|three|\d+)|figure\s*\d+|page\s*\d*|no diagram).*$",
-                                caption_clean, re.IGNORECASE
-                            ):
-                                page_text = page.get("text", "")
-                                page["text"] = f"{page_text}\n\nImage caption: {caption_clean}".strip()
+                # NOTE: Caption appending removed - text+image docs use multimodal embeddings,
+                # handwritten docs have text replaced directly during vision extraction
                 
                 # For form documents, use larger chunks to keep form sections together
                 if is_form_document:
@@ -1453,10 +1457,15 @@ INSTRUCTIONS:
                 "The UI will display citations separately. Focus only on the answer. "
                 "If vector_search returns no relevant chunks, do not claim internal knowledge. "
                 "If insufficient info, say so explicitly without guessing. "
-                "Format the response as: "
-                "First a single paragraph (no label), "
-                "then bullet points (no label),"
-                "then a short summary (label)"
+                "\n\n"
+                "FORMAT YOUR RESPONSE USING CLEAN MARKDOWN:\n"
+                "1. Start with a brief overview paragraph (2-3 sentences max)\n"
+                "2. Then use **Key Points:** as a header followed by bullet points:\n"
+                "   - Each bullet on its own line\n"
+                "   - Keep bullets concise and clear\n"
+                "   - Use sub-bullets if needed for details\n"
+                "3. End with **Summary:** followed by 1-2 sentence conclusion\n\n"
+                "IMPORTANT: Use proper line breaks between sections. Keep the response well-structured and easy to scan."
             )
 
             messages: List[Dict] = [{"role": "system", "content": system_prompt}]
@@ -1712,10 +1721,16 @@ CRITICAL RULES:
 4. Do NOT add explanatory details (like functions, mechanisms, processes) unless they are explicitly labeled or described in the source
 5. If information comes from an image, say "As shown in the diagram..." or "The figure shows..."
 6. Keep answers factual and directly tied to visible labels/text in the sources
-7. Include page numbers when citing (e.g., "Figure 1, page 1")
 
-BAD: "Meissner's corpuscles detect light touch" (adding function not shown in diagram)
-GOOD: "The diagram shows Meissner's corpuscles in the upper dermis"
+FORMAT YOUR RESPONSE USING CLEAN MARKDOWN:
+1. Start with a brief overview paragraph (2-3 sentences max)
+2. Then use **Key Points:** as a header followed by bullet points:
+   - Each bullet on its own line
+   - Keep bullets concise and clear
+   - Reference specific figures/pages when relevant
+3. End with **Summary:** followed by 1-2 sentence conclusion
+
+Use proper line breaks between sections. Keep the response well-structured and easy to scan.
 
 Answer the question based strictly on the provided context."""
                     
