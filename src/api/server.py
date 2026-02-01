@@ -25,12 +25,20 @@ from pydantic import BaseModel
 
 from src.rag_agent import RAGAgent
 import logging
+import sys
 
 # Configure logging to show detailed application logs
+# Force output to stdout for Docker compatibility
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout,
+    force=True
 )
+
+# Set root logger to INFO
+logging.getLogger().setLevel(logging.INFO)
+
 # Also set specific loggers to INFO
 for log_name in ['src', 'src.rag_agent', 'src.ner', 'src.ner.entity_extractor', 'src.ingestion', '__main__']:
     logging.getLogger(log_name).setLevel(logging.INFO)
