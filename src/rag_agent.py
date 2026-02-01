@@ -36,13 +36,22 @@ class RAGAgent:
         # Initialize embedding generator
         # Use Titan Multimodal (text+image) or Azure OpenAI (text-only)
         self.use_titan_embeddings = getattr(settings, "use_titan_embeddings", False)
+        self.use_titan_v2 = getattr(settings, "use_titan_v2_for_text", False)
         
         if self.use_titan_embeddings:
-            logger.info("Using Titan Multimodal Embeddings (1024 dims, text+image)")
+            if self.use_titan_v2:
+                logger.info("Using Titan Embeddings: V2 for text (multilingual), V1 for images")
+                print("[INIT] Titan Embeddings: V2 (multilingual text), V1 (images)")
+            else:
+                logger.info("Using Titan V1 Embeddings (English text + images)")
+                print("[INIT] Titan Embeddings: V1 only (English text + images)")
+            
             self.embedding_generator = TitanMultimodalEmbeddings(
                 region_name=settings.aws_region,
                 aws_access_key_id=settings.aws_access_key_id or None,
                 aws_secret_access_key=settings.aws_secret_access_key or None,
+                use_v2_for_text=self.use_titan_v2,
+                translation_cache_dir=getattr(settings, "translation_cache_dir", None),
             )
         else:
             logger.info("Using Azure OpenAI Embeddings (1536 dims, text-only)")
@@ -87,11 +96,15 @@ class RAGAgent:
         )
         self.graph_scorer = GraphConfidenceScorer(self.neo4j_client)
         
-        # Initialize text chunker
+        # Initialize text chunker with Arabic support
+        use_arabic_chunking = getattr(settings, "use_arabic_sentence_chunking", False)
         self.text_chunker = TextChunker(
             chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap
+            chunk_overlap=settings.chunk_overlap,
+            use_arabic_chunking=use_arabic_chunking
         )
+        if use_arabic_chunking:
+            logger.info("Text chunker initialized with Arabic sentence boundary support")
 
         # Initialize web search client (Surf-like API), if configured
         self.web_search_client: Optional[WebSearchClient] = None
@@ -839,15 +852,31 @@ class RAGAgent:
                         metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash, "is_form": True}
                     )
                 else:
-                    chunks = self.text_chunker.chunk_text_by_pages(
-                        pages,
+                    # Use smart chunking (auto-detects Arabic and uses sentence boundaries)
+                    if is_arabic_doc and getattr(settings, "use_arabic_sentence_chunking", False):
+                        print("[INGEST] Using Arabic sentence-based chunking")
+                        chunks = self.text_chunker.chunk_text_by_pages_smart(
+                            pages,
+                            metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash, "is_arabic": True}
+                        )
+                    else:
+                        chunks = self.text_chunker.chunk_text_by_pages(
+                            pages,
+                            metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash}
+                        )
+            else:
+                # Use smart chunking for full text
+                if is_arabic_doc and getattr(settings, "use_arabic_sentence_chunking", False):
+                    print("[INGEST] Using Arabic sentence-based chunking")
+                    chunks = self.text_chunker.chunk_text_smart(
+                        full_text,
+                        metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash, "is_arabic": True}
+                    )
+                else:
+                    chunks = self.text_chunker.chunk_text(
+                        full_text,
                         metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash}
                     )
-            else:
-                chunks = self.text_chunker.chunk_text(
-                    full_text,
-                    metadata={"doc_id": doc_id, "file_path": document_path, "doc_hash": doc_hash}
-                )
             
             if not chunks:
                 raise ValueError("No chunks created from document")
@@ -859,22 +888,40 @@ class RAGAgent:
             # Step 5: Generate embeddings for chunks
             logger.info(f"[INGEST] Generating embeddings for {len(chunks)} chunks")
             try:
-                # For Titan (English-only): translate Arabic chunks to English for embedding
-                # so English queries retrieve them. Original text is kept for display.
-                translate_arabic = getattr(settings, "translate_arabic_for_embedding", False) and self.use_titan_embeddings
-                chunk_texts_for_embedding = []
-                for chunk in chunks:
-                    content = chunk.get("content") or ""
-                    if translate_arabic and self._is_predominantly_arabic(content):
-                        translated = self._translate_arabic_to_english(content)
-                        chunk_texts_for_embedding.append(translated if translated else content)
-                        logger.debug("[INGEST] Using English translation for embedding (Arabic chunk)")
-                    else:
-                        chunk_texts_for_embedding.append(content)
+                chunk_texts_for_embedding = [chunk.get("content") or "" for chunk in chunks]
+                
                 if self.use_titan_embeddings:
-                    embeddings = self.embedding_generator.embed_texts(chunk_texts_for_embedding)
+                    # SMART MODEL SELECTION:
+                    # - Arabic documents → Use V2 (native multilingual, no translation needed)
+                    # - Non-Arabic documents → Use V1 (same vector space as images for multimodal)
+                    use_v2_for_this_doc = self.use_titan_v2 and is_arabic_doc
+                    
+                    if use_v2_for_this_doc:
+                        # V2: Native multilingual support - no translation needed!
+                        logger.info("[INGEST] Arabic document detected → Using Titan V2 for text embeddings")
+                        print("[INGEST] Arabic document → Titan V2 (native multilingual, no translation)")
+                        embeddings = self.embedding_generator.embed_texts(chunk_texts_for_embedding, force_v2=True)
+                    elif is_arabic_doc and not self.use_titan_v2:
+                        # V1 with translation for Arabic (fallback when V2 disabled)
+                        translate_arabic = getattr(settings, "translate_arabic_for_embedding", False)
+                        if translate_arabic:
+                            logger.info("[INGEST] Arabic document + V2 disabled → Using V1 with translation")
+                            print("[INGEST] Arabic document → Titan V1 with translation")
+                            embeddings = self.embedding_generator.embed_texts_smart(
+                                chunk_texts_for_embedding,
+                                translate_func=self._translate_arabic_to_english
+                            )
+                        else:
+                            embeddings = self.embedding_generator.embed_texts(chunk_texts_for_embedding, force_v2=False)
+                    else:
+                        # Non-Arabic document → Use V1 (same space as images)
+                        logger.info("[INGEST] Non-Arabic document → Using Titan V1 (multimodal space)")
+                        print("[INGEST] Non-Arabic document → Titan V1 (shared space with images)")
+                        embeddings = self.embedding_generator.embed_texts(chunk_texts_for_embedding, force_v2=False)
+                    
                 else:
                     embeddings = self.embedding_generator.generate_embeddings_batch(chunk_texts_for_embedding)
+                
                 logger.info(f"[INGEST] Generated {len(embeddings)} text embeddings")
             except Exception as e:
                 logger.error(f"[INGEST] Embedding generation failed: {str(e)}")
@@ -1481,8 +1528,15 @@ INSTRUCTIONS:
         logger.info(f"[QUERY] Processing question: {question}")
         
         try:
+            # Default thresholds for same-language retrieval (English docs with English queries)
             vector_high_threshold = 0.7
             vector_low_threshold = 0.3
+            
+            # Cross-lingual thresholds (Arabic docs with English queries via translation)
+            # Translation-based retrieval typically achieves 0.4-0.5 similarity
+            cross_lingual_high_threshold = 0.4
+            cross_lingual_low_threshold = 0.2
+            
             question_lower = question.strip().lower()
             question_norm = re.sub(r"[^a-z0-9\s]", " ", question_lower)
             question_norm = re.sub(r"\s+", " ", question_norm).strip()
@@ -1576,6 +1630,7 @@ INSTRUCTIONS:
             vector_sufficient = False
             graph_sufficient = False
             vector_best_score: Optional[float] = None
+            is_cross_lingual_query = False  # Set to True when results are from Arabic docs
             graph_signal: int = 0
             graph_threshold: int = 4
             graph_confidence_threshold = 0.6
@@ -1583,7 +1638,7 @@ INSTRUCTIONS:
             decision_trace: Dict[str, object] = {}
 
             def _handle_vector_search(args: Dict) -> Dict:
-                nonlocal chunks, vector_sufficient, vector_best_score
+                nonlocal chunks, vector_sufficient, vector_best_score, is_cross_lingual_query
                 query_text = args.get("query") or question
                 k = int(args.get("top_k") or top_k)
                 initial_k = int(args.get("initial_k") or max(k, k * 2))
@@ -1735,8 +1790,35 @@ INSTRUCTIONS:
                     results = results[:k]
 
                 vector_best_score = max([c["similarity"] for c in results if c.get("similarity") is not None], default=None)
+                logger.info(f"[QUERY] Vector best score: {vector_best_score}, num results: {len(results)}")
                 chunks = results  # Keep full data including image_b64 for multimodal context
-                vector_sufficient = vector_best_score is not None and vector_best_score >= vector_high_threshold
+                
+                # Detect if this is a true cross-lingual query (Arabic query retrieving Arabic docs)
+                # Only use lower thresholds if the QUERY itself is in Arabic
+                # If query is English but results are Arabic, that's garbage - don't lower thresholds
+                query_arabic_chars = sum(1 for c in question if "\u0600" <= c <= "\u06FF")
+                query_is_arabic = len(question) > 0 and (query_arabic_chars / len(question)) > 0.2
+                
+                if query_is_arabic and results:
+                    # Query is Arabic - check if results are also Arabic (true cross-lingual)
+                    for r in results[:3]:
+                        sample = (r.get("text", "") or r.get("content", ""))[:500]
+                        arabic_chars = sum(1 for c in sample if "\u0600" <= c <= "\u06FF")
+                        ratio = arabic_chars / len(sample) if len(sample) > 0 else 0
+                        if len(sample) > 0 and ratio > 0.2:
+                            is_cross_lingual_query = True
+                            logger.info(f"[QUERY] True cross-lingual query detected (Arabic query + Arabic results)")
+                            break
+                
+                # Use appropriate threshold based on document language
+                effective_high_threshold = cross_lingual_high_threshold if is_cross_lingual_query else vector_high_threshold
+                if is_cross_lingual_query:
+                    logger.info(f"[QUERY] Cross-lingual retrieval detected (Arabic docs) - using threshold {effective_high_threshold}")
+                else:
+                    logger.info(f"[QUERY] Standard retrieval - using threshold {effective_high_threshold}")
+                
+                vector_sufficient = vector_best_score is not None and vector_best_score >= effective_high_threshold
+                logger.info(f"[QUERY] vector_sufficient={vector_sufficient} (score {vector_best_score} >= threshold {effective_high_threshold})")
                 
                 # Strip image_b64 from tool result to avoid bloating the message (images are huge)
                 # The full data is preserved in `chunks` for the multimodal answer generation
@@ -1905,10 +1987,14 @@ INSTRUCTIONS:
                     }
                 )
 
-            # Step 2: Graph expansion ONLY when vector score is in [0.4, 0.7)
+            # Compute effective thresholds based on whether results are from Arabic docs
+            effective_high = cross_lingual_high_threshold if is_cross_lingual_query else vector_high_threshold
+            effective_low = cross_lingual_low_threshold if is_cross_lingual_query else vector_low_threshold
+            
+            # Step 2: Graph expansion ONLY when vector score is in [low, high)
             if (
                 (vector_best_score is not None)
-                and (vector_low_threshold <= vector_best_score < vector_high_threshold)
+                and (effective_low <= vector_best_score < effective_high)
                 and chunks
                 and use_graph_context
                 and self.neo4j_client is not None
@@ -1958,15 +2044,30 @@ INSTRUCTIONS:
 
             internal_sufficient = vector_sufficient or graph_sufficient
 
-            # Step 3: Web search ONLY when vector score < 0.4
-            if (
+            # Step 3: Web search when internal knowledge is not sufficient
+            # Trigger web search if:
+            # - Vector score < low threshold (clearly not in KB), OR
+            # - Score in middle range AND vector is NOT sufficient (graph entities might be irrelevant)
+            web_client_available = self.web_search_client is not None
+            score_below_low = vector_best_score is not None and vector_best_score < effective_low
+            score_in_middle = vector_best_score is not None and effective_low <= vector_best_score < effective_high
+            
+            # Key insight: If vector_sufficient=False and score is mediocre, graph entities 
+            # are likely irrelevant (e.g., query about actor but graph has medical entities)
+            # In this case, trigger web search to get actual relevant information
+            should_web_search = (
                 vector_best_score is not None
                 and (
-                    vector_best_score < vector_low_threshold
-                    or (vector_low_threshold <= vector_best_score < vector_high_threshold and graph_confidence.get("confidence", 0.0) < graph_confidence_threshold)
+                    score_below_low  # Score < 0.3: definitely need web
+                    or (score_in_middle and not vector_sufficient)  # Score 0.3-0.7 but not sufficient: try web
                 )
-                and self.web_search_client is not None
-            ):
+                and web_client_available
+            )
+            
+            logger.info(f"[QUERY] Web search check: score={vector_best_score}, low={effective_low}, high={effective_high}")
+            logger.info(f"[QUERY] Web search: below_low={score_below_low}, in_middle={score_in_middle}, vector_sufficient={vector_sufficient}, should_web={should_web_search}")
+            
+            if should_web_search:
                 response = self.llm_client.chat_completion_raw(
                     messages=messages, tools=[web_tool], tool_choice={"type": "function", "function": {"name": "web_search"}}
                 )
@@ -2015,10 +2116,13 @@ INSTRUCTIONS:
                 "graph_triggered": tools_used["graph"],
                 "web_triggered": tools_used["web"],
                 "web_trigger_reason": "internal_insufficient" if (tools_used["web"] and not internal_sufficient) else None,
+                "is_cross_lingual": is_cross_lingual_query,
+                "effective_high_threshold": effective_high,
+                "effective_low_threshold": effective_low,
             }
 
             # If vector score is below low threshold, ignore internal chunks/citations.
-            if vector_best_score is not None and vector_best_score < vector_low_threshold:
+            if vector_best_score is not None and vector_best_score < effective_low:
                 chunks = []
                 citations = []
 
@@ -2038,7 +2142,23 @@ INSTRUCTIONS:
             )
 
             answer = ""
+            logger.info(f"[QUERY] internal_available={internal_available}, web_available={web_available}, entities={len(entities)}, relationships={len(relationships)}")
+            logger.info(f"[QUERY] internal_sufficient={internal_sufficient}, vector_sufficient={vector_sufficient}")
+            logger.info(f"[QUERY] Chunks count: {len(chunks)}, first chunk text: {chunks[0].get('text', chunks[0].get('content', ''))[:100] if chunks else 'NONE'}...")
+            logger.info(f"[QUERY] Messages count: {len(messages)}, last message role: {messages[-1].get('role') if messages else 'NONE'}")
             if internal_available or web_available or entities or relationships:
+                logger.info("[QUERY] Entering LLM answer generation...")
+                # Add context from chunks to messages for final answer
+                if chunks:
+                    context_text = "\n\n".join([
+                        f"[Source: {c.get('doc_name', 'Unknown')}, Page {c.get('page_number', '?')}]\n{c.get('text', c.get('content', ''))}"
+                        for c in chunks[:5]
+                    ])
+                    messages.append({
+                        "role": "user",
+                        "content": f"Based on the following retrieved documents, please answer my question: {question}\n\n--- RETRIEVED CONTEXT ---\n{context_text}\n--- END CONTEXT ---"
+                    })
+                    logger.info(f"[QUERY] Added context message, total messages: {len(messages)}")
                 # Check if any chunks have images for multimodal context
                 has_image_chunks = any(c.get("content_type") == "image" and c.get("image_b64") for c in chunks)
                 
@@ -2077,8 +2197,10 @@ Answer the question based strictly on the provided context."""
                         {"role": "user", "content": multimodal_content}
                     ]
                     answer = self.llm_client.chat_completion(multimodal_messages)
+                    logger.info(f"[QUERY] Multimodal LLM answer length: {len(answer) if answer else 0}")
                 else:
                     answer = self.llm_client.chat_completion(messages)
+                    logger.info(f"[QUERY] Standard LLM answer length: {len(answer) if answer else 0}")
             elif not internal_sufficient and self.web_search_client is None:
                 answer = (
                     "I could not find sufficient information in the internal knowledge base, "

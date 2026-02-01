@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
 
-    # Titan Multimodal Embeddings
+    # Titan Embeddings
+    # V1 (amazon.titan-embed-image-v1): Multimodal (text + image), English only
+    # V2 (amazon.titan-embed-text-v2:0): Text only, Multilingual (100+ languages)
     use_titan_embeddings: bool = True
     titan_embedding_model_id: str = "amazon.titan-embed-image-v1"
+    use_titan_v2_for_text: bool = True  # If True, use V2 for text (native multilingual), V1 for images
 
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"
@@ -51,9 +54,17 @@ class Settings(BaseSettings):
     temperature: float = 0.7
     ingestion_vision_fallback_min_chars: int = 50
 
-    # Arabic / cross-lingual: translate Arabic to English for embedding (Titan is English-only)
-    # So English queries can retrieve Arabic content. Original Arabic is kept for display.
+    # Arabic / cross-lingual settings
+    # If use_titan_v2_for_text=True, no translation needed (V2 is multilingual)
+    # If use_titan_v2_for_text=False, translate Arabic to English for embedding (V1 is English-only)
     translate_arabic_for_embedding: bool = True
+    
+    # Arabic-specific chunking: use sentence boundaries instead of character count
+    # This produces better semantic chunks for Arabic text
+    use_arabic_sentence_chunking: bool = True
+    
+    # Translation cache directory (for caching Arabic-to-English translations)
+    translation_cache_dir: Optional[str] = None  # Default: ~/.cache/rag_translations
 
     class Config:
         env_file = ".env"

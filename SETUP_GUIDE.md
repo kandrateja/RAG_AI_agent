@@ -12,9 +12,10 @@ Before starting, ensure you have:
 - [ ] **Python 3.9+** installed (only for Option B - local development)
 - [ ] **AWS Account** with Bedrock access for:
   - Claude Sonnet 4 (LLM + Vision)
-  - Titan Multimodal Embeddings
+  - Titan Multimodal Embeddings (V1)
+  - Titan Text Embeddings (V2) - for multilingual support--optional
 - [ ] **SERPAPI Account** for web search (get key from https://serpapi.com/)
-- [ ] At least one **scanned PDF document** to test with
+- [ ] PDF documents to test with (scanned, handwritten, Arabic, or standard)
 
 ---
 
@@ -49,9 +50,13 @@ AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
 
 # ============================================
 # AWS TITAN EMBEDDINGS (Required)
+# Choose V1 only(manual by llm) or V2 for multilingual support(automatic)
 # ============================================
 USE_TITAN_EMBEDDINGS=true
 TITAN_EMBEDDING_MODEL_ID=amazon.titan-embed-image-v1
+
+# V2 for native multilingual (recommended for Arabic documents)
+USE_TITAN_V2_FOR_TEXT=true
 
 # ============================================
 # NEO4J GRAPH DATABASE (Required)
@@ -74,28 +79,35 @@ SURF_API_KEY=your-serpapi-key
 SURF_MAX_RESULTS=5
 
 # ============================================
-# APPLICATION SETTINGS (Optional - defaults shown)
+# ARABIC / MULTILINGUAL SETTINGS
+# ============================================
+# If V2 is disabled, enable these for Arabic support via translation
+TRANSLATE_ARABIC_FOR_EMBEDDING=true
+USE_ARABIC_SENTENCE_CHUNKING=true
+
+# ============================================
+# APPLICATION SETTINGS
 # ============================================
 CHUNK_SIZE=1000
 CHUNK_OVERLAP=200
-MAX_TOKENS=4096
-TEMPERATURE=0.7
 INGESTION_PIPELINE_HINT=auto
-INGESTION_VISION_FALLBACK_MIN_CHARS=50
-TRANSLATE_ARABIC_FOR_EMBEDDING=true
 ```
 
-### 2.3 Important Notes
+### 2.3 Embedding Model Selection
 
-- **AWS Credentials**: Must have Bedrock access enabled for Claude and Titan models
-- **Neo4j Password**: Must match `rag-neo4j-password-2024` (set in docker-compose.yml)
-- **SERPAPI Key**: Get from https://serpapi.com/ (free tier available)
+| Configuration | Use Case | Arabic Support |
+|--------------|----------|----------------|
+| `USE_TITAN_V2_FOR_TEXT=true` | Multilingual documents | ✅ Native |
+| `USE_TITAN_V2_FOR_TEXT=false` + `TRANSLATE_ARABIC_FOR_EMBEDDING=true` | Cross-lingual demonstration | ✅ Via translation |
+| `USE_TITAN_V2_FOR_TEXT=false` + `TRANSLATE_ARABIC_FOR_EMBEDDING=false` | English only | ❌ |
+
+**Recommendation**: Use V2 for production Arabic support. Use V1+translation to demonstrate cross-lingual retrieval understanding.
 
 ---
 
 ## Step 3: Choose Your Setup Method
 
-### Option A: Full Docker (Recommended for Reviewers)
+### Option A: Full Docker (Recommended)
 
 This runs everything in Docker - no Python installation needed.
 
@@ -122,14 +134,14 @@ rag-api       Up (healthy)             0.0.0.0:8000->8000/tcp
 
 ---
 
-### Option B: Local Development (Databases in Docker, App Local)
+### Option B: Local Development
 
 Use this for development with hot-reload.
 
 #### 3B.1 Start databases only
 
 ```bash
-docker-compose -f docker-compose.dev.yml up -d
+docker-compose up -d postgres-rag neo4j-rag
 ```
 
 #### 3B.2 Verify databases are running
@@ -145,34 +157,15 @@ xxxx           pgvector/pgvector:pg16   Up (healthy)    0.0.0.0:5432->5432/tcp
 xxxx           neo4j:5                  Up (healthy)    0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
 ```
 
-#### 3B.3 Wait for Neo4j to be ready (first time only)
-
-```bash
-docker logs -f neo4j-rag
-```
-
-Press `Ctrl+C` once you see "Started."
-
----
-
-## Step 4: Install Python Dependencies (Option B Only)
-
-Skip this step if you're using Option A (Full Docker).
-
-### 4.1 Create virtual environment
+#### 3B.3 Create virtual environment and install dependencies
 
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-### 4.2 Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 4.3 Install Tesseract OCR (for scanned PDFs with Arabic)
+#### 3B.4 Install Tesseract OCR (for scanned PDFs)
 
 **macOS:**
 ```bash
@@ -184,11 +177,7 @@ brew install tesseract tesseract-lang
 sudo apt-get install tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng
 ```
 
----
-
-## Step 5: Start the Application (Option B Only)
-
-Skip this step if you're using Option A (Full Docker).
+#### 3B.5 Start the application
 
 ```bash
 uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
@@ -196,13 +185,13 @@ uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
 
 You should see:
 ```
+[INIT] Titan Embeddings: V2 for text (multilingual), V1 for images
 INFO:     Uvicorn running on http://0.0.0.0:8000
-INFO:     Started reloader process
 ```
 
 ---
 
-## Step 6: Access the System
+## Step 4: Access the System
 
 | URL | Description |
 |-----|-------------|
@@ -213,95 +202,136 @@ INFO:     Started reloader process
 
 ---
 
-## Step 7: Test Document Ingestion
+## Step 5: Test Document Ingestion
 
-### 7.1 Open Web UI
+### 5.1 Document Types to Test
 
-Navigate to http://localhost:8000/
+| Document Type | What to Check |
+|--------------|---------------|
+| **Standard PDF** | Text extraction, chunking |
+| **Scanned PDF** | OCR extraction (Tesseract) |
+| **Handwritten Form** | Vision fallback, checkbox detection |
+| **Arabic Document** | Arabic text extraction, V1/V2 embedding |
+| **Text + Images PDF** | Figure extraction, multimodal embedding |
 
-### 7.2 Upload a PDF
+### 5.2 Upload a PDF
 
-1. Click the **Upload** area or drag a PDF file
-2. Wait for the file to upload
+1. Open http://localhost:8000/
+2. Click the **Upload** area or drag a PDF file
 3. Click **Ingest Document**
 
-### 7.3 Monitor Ingestion Logs
+### 5.3 Monitor Ingestion Logs
 
-In the terminal running the server, you'll see:
+Watch the terminal for:
+
 ```
 [INGEST] Processing document: example.pdf
 [INGEST] Extracted 10 pages of text
-[INGEST] Page 1: Form extraction stats:
-  - Checkboxes: 5 ticked, 3 empty
-  - Table columns (| chars): 48
-[INGEST] Extracted 15 entities and 8 relationships
+[INGEST] Document detected as predominantly Arabic
+[INGEST] Arabic document → Titan V2 (native multilingual)  # or V1 with translation
 [INGEST] Created 25 chunks
 [INGEST] Stored in PostgreSQL and Neo4j
 ```
 
-### 7.4 Verify Ingestion Success
+### 5.4 Verify Ingestion
 
-The response will show:
-```json
-{
-  "doc_id": "example-uuid",
-  "status": "success",
-  "chunks_created": 25,
-  "entities_extracted": 15,
-  "relationships_extracted": 8
-}
+```bash
+# Check chunk count
+docker exec postgres-rag psql -U postgres -d rag -c "SELECT COUNT(*) FROM chunks;"
+
+# View sample chunks
+docker exec postgres-rag psql -U postgres -d rag -c "SELECT chunk_id, page_number, LEFT(text, 100) FROM chunks LIMIT 5;"
 ```
 
 ---
 
-## Step 8: Test Queries
+## Step 6: Test Queries
 
-### 8.1 Sample Test Questions
+### 6.1 Standard Document Questions
 
-Based on a handwritten safeguarding form, test these:
+| Question | Expected Behavior |
+|----------|------------------|
+| Question about ingested content | Returns answer with citations |
+| Question not in documents | Triggers web search fallback |
+| "What is the weather today?" | Web search only |
 
-| # | Question | Expected Answer |
-|---|----------|-----------------|
-| 1 | What is the telephone number for Middlesbrough Adult Access Team? | 01642 065070 |
-| 2 | Was an interpreter needed for this case? | No (checkbox was ticked for No) |
-| 3 | What type of abuse did the patient disclose? | Physical abuse (hitting and kicking) |
-| 4 | What is the patient's name and address? | Peter Jones, 1 The Front, Hartlepool |
-| 5 | What type of abuse was suspected according to the checkboxes? | Discriminatory |
-| 6 | Does the adult have mental capacity? | Yes |
+### 6.2 Arabic Document Questions
 
-### 8.2 Test Internal Knowledge
+If you've ingested an Arabic document:
 
-Ask a question about your ingested document. The response should include:
-- `provenance: "internal"`
-- Citations with doc_id, page_number, chunk_id
+**English Questions (Cross-lingual):**
+- "What is the role of the International Court of Justice?"
+- "What cases are mentioned in the document?"
 
-### 8.3 Test Web Search Fallback
+**Arabic Questions:**
+- "ما هو دور محكمة العدل الدولية؟"
+- "ما هي القضايا المذكورة في الوثيقة؟"
 
-Ask a question NOT in your documents (e.g., "What is the current weather?"). The response should include:
-- `provenance: "online"` or `provenance: "both"`
-- Web citations with URLs
+### 6.3 Check Response Quality
+
+Look for:
+- `provenance: "internal"` - Answer from ingested documents
+- `citations` - List of sources with page numbers
+- `decision_trace.is_cross_lingual` - True for Arabic documents
+- `decision_trace.effective_high_threshold` - 0.4 for cross-lingual, 0.7 for same-language
 
 ---
 
-## Step 9: Verify Data in Databases
+## Step 7: Switching Between V1 and V2
 
-### 9.1 Check PostgreSQL
+### Switch to V2 (Native Multilingual)
+
+1. Edit `.env`:
+   ```env
+   USE_TITAN_V2_FOR_TEXT=true
+   ```
+
+2. Clear database (embeddings are incompatible):
+   ```bash
+   docker exec postgres-rag psql -U postgres -d rag -c "DELETE FROM chunks; DELETE FROM documents;"
+   docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH (n) DETACH DELETE n;"
+   ```
+
+3. Restart server
+
+4. Re-ingest documents
+
+### Switch to V1 (Translation-based)
+
+1. Edit `.env`:
+   ```env
+   USE_TITAN_V2_FOR_TEXT=false
+   TRANSLATE_ARABIC_FOR_EMBEDDING=true
+   USE_ARABIC_SENTENCE_CHUNKING=true
+   ```
+
+2. Clear database and restart
+
+3. Re-ingest documents
+
+---
+
+## Step 8: Verify Data in Databases
+
+### 8.1 Check PostgreSQL
 
 ```bash
-# Connect to PostgreSQL
 docker exec -it postgres-rag psql -U postgres -d rag
 
 # Count chunks
 SELECT COUNT(*) FROM chunks;
 
-# View sample chunks
-SELECT chunk_id, page_number, LEFT(text, 100) FROM chunks LIMIT 5;
+# View chunks by document
+SELECT doc_id, COUNT(*) as chunks FROM chunks GROUP BY doc_id;
+
+# Check embedding dimensions
+SELECT chunk_id, array_length(embedding, 1) as dim FROM chunks LIMIT 1;
 
 # Exit
 \q
 ```
 
-### 9.2 Check Neo4j
+### 8.2 Check Neo4j
 
 1. Open http://localhost:7474/
 2. Login: username `neo4j`, password `rag-neo4j-password-2024`
@@ -311,8 +341,8 @@ SELECT chunk_id, page_number, LEFT(text, 100) FROM chunks LIMIT 5;
 // Count entities
 MATCH (e) WHERE 'Entity' IN labels(e) RETURN count(e);
 
-// View entities
-MATCH (e) WHERE 'Entity' IN labels(e) RETURN e.name, e.type LIMIT 10;
+// View entities by type
+MATCH (e) WHERE 'Entity' IN labels(e) RETURN e.type, count(e) ORDER BY count(e) DESC;
 
 // View relationships
 MATCH (e1)-[r]->(e2) 
@@ -322,25 +352,23 @@ RETURN e1.name, type(r), e2.name LIMIT 10;
 
 ---
 
-## Step 10: Stop the System
+## Step 9: Stop the System
 
-### 10.1 Stop the Python server
-
-Press `Ctrl+C` in the terminal running uvicorn
-
-### 10.2 Stop databases
+### Stop everything
 
 ```bash
 docker-compose down
 ```
 
-### 10.3 Remove all data (fresh start)
+### Stop and remove all data
 
 ```bash
-# Stop and remove volumes
 docker-compose down -v
+```
 
-# Or manually clear data without removing containers
+### Clear data only (keep containers)
+
+```bash
 docker exec postgres-rag psql -U postgres -d rag -c "DELETE FROM chunks; DELETE FROM documents;"
 docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH (n) DETACH DELETE n;"
 ```
@@ -351,164 +379,105 @@ docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH 
 
 ### Issue: AWS Bedrock Access Denied
 
-```
-Error: AccessDeniedException
-```
-
 **Solution:**
-1. Verify AWS credentials are correct in `.env`
+1. Verify AWS credentials in `.env`
 2. Ensure Bedrock model access is enabled in AWS Console
-3. Check your IAM role has `bedrock:InvokeModel` permission
+3. Check IAM role has `bedrock:InvokeModel` permission
 
-### Issue: Neo4j Connection Failed
+### Issue: Low Similarity Scores for Arabic
 
-```
-Error: Failed to connect to Neo4j
-```
+**Symptoms:** Scores around 0.3-0.4 for Arabic documents
 
 **Solution:**
-1. Verify Neo4j container is running: `docker ps`
-2. Check password matches: `rag-neo4j-password-2024`
-3. Wait for Neo4j to fully start (can take 30-60 seconds)
+- The system automatically adjusts thresholds for cross-lingual retrieval
+- Check logs for: `[QUERY] Cross-lingual retrieval detected - using threshold 0.4`
+- Consider switching to V2 for native multilingual support
 
-### Issue: Empty Document Extraction
-
-**Solution:**
-1. If PDF is scanned, ensure Tesseract is installed
-2. Check terminal logs for vision fallback messages
-3. Verify the PDF contains actual content (not blank)
-
-### Issue: Missing Table Columns
+### Issue: "Could not find sufficient information"
 
 **Solution:**
-1. Clear database and re-ingest the document
-2. Check logs for `[DOCLING TABLE]` messages
-3. Vision will automatically extract tables if Docling fails
+1. Check that documents were ingested successfully
+2. Verify the question relates to ingested content
+3. Check logs for threshold values and similarity scores
+4. For Arabic docs, ensure cross-lingual detection is working
 
-### Issue: Port Already in Use
-
-```
-Error: Address already in use
-```
+### Issue: Empty Extraction from Scanned PDF
 
 **Solution:**
-```bash
-# Find process using port 8000
-lsof -i :8000
+1. Ensure Tesseract OCR is installed
+2. Check logs for OCR messages
+3. Vision fallback should trigger automatically
 
-# Kill the process
-kill -9 <PID>
+### Issue: V1/V2 Embedding Mismatch
 
-# Or use a different port
-uvicorn src.api.server:app --port 8001
-```
+**Symptoms:** "Could not find information" after changing V1/V2 setting
+
+**Solution:**
+- V1 and V2 embeddings are in different vector spaces
+- Must clear database and re-ingest after switching models
 
 ---
 
 ## Quick Reference Commands
 
-### Option A: Full Docker
+### Full Docker
 
 ```bash
-# Start everything
-docker-compose up -d
-
-# Check status
-docker-compose ps
-
-# View all logs
-docker-compose logs -f
-
-# View specific service logs
-docker-compose logs -f rag-api
-
-# Stop everything
-docker-compose down
-
-# Stop and remove all data
-docker-compose down -v
+docker-compose up -d          # Start all
+docker-compose ps             # Check status
+docker-compose logs -f        # View logs
+docker-compose down           # Stop
+docker-compose down -v        # Stop + remove data
 ```
 
-### Option B: Local Development
+### Local Development
 
 ```bash
-# Start databases only
-docker-compose -f docker-compose.dev.yml up -d
-
-# Run Python app
-uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-
-# Stop
-Ctrl+C  # Stop uvicorn
-docker-compose -f docker-compose.dev.yml down
+docker-compose up -d postgres-rag neo4j-rag   # Start DBs
+source venv/bin/activate                        # Activate venv
+uvicorn src.api.server:app --reload --port 8000 # Run server
 ```
 
 ### Database Operations
 
 ```bash
-# Clear all data (both options)
+# Clear all data
 docker exec postgres-rag psql -U postgres -d rag -c "DELETE FROM chunks; DELETE FROM documents;"
 docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH (n) DETACH DELETE n;"
 
-# Check PostgreSQL
+# Check counts
 docker exec postgres-rag psql -U postgres -d rag -c "SELECT COUNT(*) FROM chunks;"
-
-# Check Neo4j (open browser)
-open http://localhost:7474
 ```
 
 ---
 
-## Summary Checklist
-
-### Prerequisites
-- [ ] Docker and Docker Compose installed
-- [ ] Repository cloned
-- [ ] `.env` file created with:
-  - [ ] AWS Bedrock credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-  - [ ] SERPAPI key (SURF_API_KEY)
-
-### Option A: Full Docker
-- [ ] Run `docker-compose up -d`
-- [ ] All 3 services healthy: `docker-compose ps`
-- [ ] Web UI accessible at http://localhost:8000/
-
-### Option B: Local Development
-- [ ] Databases started: `docker-compose -f docker-compose.dev.yml up -d`
-- [ ] Python 3.9+ installed
-- [ ] Virtual environment created and activated
-- [ ] Dependencies installed: `pip install -r requirements.txt`
-- [ ] Tesseract OCR installed (for scanned PDFs)
-- [ ] Application running: `uvicorn src.api.server:app --reload`
-- [ ] Web UI accessible at http://localhost:8000/
-
-### Testing
-- [ ] Document ingested successfully
-- [ ] Queries returning correct answers with citations
-- [ ] Web search fallback working (test with question not in documents)
-
----
-
-## Demo Recording Checklist
+## Demo Checklist
 
 For your assignment demo, show:
 
-1. **Document Ingestion**
-   - Upload a scanned/handwritten PDF
-   - Show logs with extraction details
-   - Verify data in PostgreSQL and Neo4j
+### 1. Document Ingestion
+- [ ] Upload a PDF (scanned/handwritten/Arabic/standard)
+- [ ] Show logs with extraction details
+- [ ] Verify data in PostgreSQL and Neo4j
 
-2. **Query Internal Knowledge**
-   - Ask questions about the ingested document
-   - Show citations (doc_id, page_number, chunk_id)
-   - Show `provenance: "internal"`
+### 2. Query Internal Knowledge
+- [ ] Ask questions about ingested document
+- [ ] Show citations (doc_id, page_number, chunk_id)
+- [ ] Show `provenance: "internal"`
 
-3. **Web Search Fallback**
-   - Ask a question not in documents
-   - Show web search being triggered
-   - Show `provenance: "online"` or `"both"`
+### 3. Cross-Lingual Retrieval (if using Arabic)
+- [ ] Ingest Arabic document
+- [ ] Query in English
+- [ ] Show Arabic text in citations
+- [ ] Show `is_cross_lingual: true` in decision trace
 
-4. **Special Features** (optional)
-   - Checkbox extraction (`[TICKED]`/`[EMPTY]`)
-   - Table extraction with multiple columns
-   - Handwritten text transcription
+### 4. Web Search Fallback
+- [ ] Ask question not in documents
+- [ ] Show web search triggered
+- [ ] Show `provenance: "online"`
+
+### 5. Special Features
+- [ ] Checkbox extraction (`[TICKED]`/`[EMPTY]`)
+- [ ] Table extraction
+- [ ] Figure-only embedding (for text+image PDFs)
+- [ ] Handwritten text transcription
