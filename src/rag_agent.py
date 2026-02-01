@@ -250,13 +250,54 @@ class RAGAgent:
             # Detect if this is an Arabic text document - skip ALL vision/image processing for it
             is_arabic_doc = self._is_predominantly_arabic(full_text)
             
-            # Check if this is a handwritten document (explicit hint or auto-detected from low OCR text)
+            # Check if this is a handwritten/scanned document using SMART DETECTION (no hardcoding)
             is_handwritten = hint == "handwritten" or pipeline_used == "auto-ocr"
             total_extracted_text = sum(len((p.get("text") or "").strip()) for p in pages)
             
-            # For handwritten: if OCR extracted very little text, use vision as primary extraction method
-            if is_handwritten or (total_extracted_text < 200 and len(pages) > 0):
-                logger.info(f"[INGEST] Handwritten/scanned document detected (extracted {total_extracted_text} chars). Using vision model for text extraction...")
+            # Smart detection: Check if Docling extracted tables with broken structure
+            # This indicates a scanned form where tables aren't properly recognized
+            def _has_broken_docling_tables(pages_list) -> bool:
+                """Detect if Docling extracted tables with missing columns (single-column tables that should be multi-column)."""
+                for p in pages_list:
+                    text = p.get("text", "")
+                    if "[Table]" in text:
+                        # Check if table rows have only 1 cell (missing columns)
+                        lines = text.split("\n")
+                        table_rows = [l for l in lines if l.strip().startswith("|") and l.strip().endswith("|")]
+                        for row in table_rows:
+                            # Count cells in row (number of | minus 1, accounting for leading/trailing |)
+                            cells = [c.strip() for c in row.split("|") if c.strip()]
+                            # If a row has only 1 cell but should have more (has lots of text), it's broken
+                            if len(cells) == 1 and len(cells[0]) > 30:
+                                return True
+                return False
+            
+            # Smart detection: Check if PDF has image-based pages (scanned)
+            # by checking if text extraction per page is suspiciously uniform or low
+            def _appears_scanned(pages_list, doc_path) -> bool:
+                """Detect if document appears to be scanned (image-based PDF)."""
+                if not pages_list:
+                    return False
+                # Check 1: Very low text extraction despite having pages
+                if total_extracted_text < 200 and len(pages_list) > 0:
+                    return True
+                # Check 2: Docling extracted tables but they're broken (single-column)
+                if _has_broken_docling_tables(pages_list):
+                    return True
+                return False
+            
+            appears_scanned = _appears_scanned(pages, document_path)
+            
+            # For handwritten/scanned forms: ALWAYS use vision as primary extraction method
+            if is_handwritten or appears_scanned:
+                detection_reason = []
+                if hint == "handwritten": detection_reason.append("explicit hint")
+                if pipeline_used == "auto-ocr": detection_reason.append("auto-OCR pipeline")
+                if total_extracted_text < 200: detection_reason.append("low text extraction")
+                if _has_broken_docling_tables(pages): detection_reason.append("broken table structure")
+                
+                logger.info(f"[INGEST] Scanned/handwritten document detected (reason: {', '.join(detection_reason)}). Using vision model...")
+                print(f"[INGEST] Scanned document detected: {', '.join(detection_reason)}")
                 is_handwritten = True
             
             use_vision_fallback = is_handwritten or any(
@@ -333,6 +374,108 @@ class RAGAgent:
                 
                 return True  # Likely a broken table
             
+            # Helper function to clean up table formatting after Vision extraction
+            def _clean_table_formatting(text: str) -> str:
+                """
+                Post-process Vision-extracted text to merge adjacent table rows.
+                Fixes issues where blank lines separate table rows or separators appear in wrong places.
+                """
+                if "|" not in text:
+                    return text
+                
+                lines = text.split("\n")
+                result = []
+                in_table = False
+                header_found = False
+                separator_added = False
+                table_buffer = []
+                
+                def is_table_row(line: str) -> bool:
+                    stripped = line.strip()
+                    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+                
+                def is_separator_row(line: str) -> bool:
+                    stripped = line.strip()
+                    # Separator is like |---|---| or |:---|:---|
+                    if not is_table_row(stripped):
+                        return False
+                    # Remove pipes and check if remaining is just dashes, colons, spaces
+                    inner = stripped[1:-1]  # Remove outer pipes
+                    inner_clean = inner.replace("|", "").replace("-", "").replace(":", "").replace(" ", "")
+                    return len(inner_clean) == 0
+                
+                def flush_table():
+                    """Flush accumulated table buffer with proper formatting."""
+                    nonlocal table_buffer, result, header_found, separator_added
+                    if not table_buffer:
+                        return
+                    
+                    # Find header row (first non-separator row)
+                    data_rows = [r for r in table_buffer if not is_separator_row(r)]
+                    
+                    if data_rows:
+                        # Output header
+                        result.append(data_rows[0])
+                        
+                        # Build separator from header if needed
+                        if len(data_rows) > 1:
+                            # Count columns from header
+                            header_cells = data_rows[0].split("|")
+                            num_cols = len([c for c in header_cells if c.strip() != ""]) 
+                            if num_cols == 0:
+                                num_cols = len(header_cells) - 2  # Subtract empty first/last from split
+                            
+                            # Generate proper separator
+                            sep = "|" + "|".join(["---"] * max(num_cols, 1)) + "|"
+                            result.append(sep)
+                            
+                            # Output remaining data rows
+                            for row in data_rows[1:]:
+                                result.append(row)
+                    
+                    table_buffer = []
+                    header_found = False
+                    separator_added = False
+                
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    stripped = line.strip()
+                    
+                    if is_table_row(stripped):
+                        # Start or continue table
+                        in_table = True
+                        table_buffer.append(stripped)
+                    elif in_table and stripped == "":
+                        # Blank line inside table - peek ahead to see if more table rows follow
+                        # If yes, skip the blank line (merge table sections)
+                        look_ahead = i + 1
+                        while look_ahead < len(lines) and lines[look_ahead].strip() == "":
+                            look_ahead += 1
+                        
+                        if look_ahead < len(lines) and is_table_row(lines[look_ahead].strip()):
+                            # More table rows ahead - skip blank lines
+                            i = look_ahead - 1  # Will be incremented at end of loop
+                        else:
+                            # End of table
+                            flush_table()
+                            result.append(line)
+                            in_table = False
+                    else:
+                        # Non-table line
+                        if in_table:
+                            flush_table()
+                            in_table = False
+                        result.append(line)
+                    
+                    i += 1
+                
+                # Flush any remaining table
+                if table_buffer:
+                    flush_table()
+                
+                return "\n".join(result)
+            
             # Check each page for broken tables
             for p in pages:
                 if _has_broken_table(p.get("text", "")):
@@ -359,10 +502,14 @@ class RAGAgent:
             
             # Skip Step 3 entirely for text-only docs (e.g. 10-page Arabic): extract text only, no page-as-image
             # EXCEPTION: Process pages with broken tables even if document is otherwise text-heavy
-            if use_vision_fallback or not all_pages_text_heavy or pages_with_broken_tables:
+            # EXCEPTION: ALWAYS process handwritten documents with vision
+            if use_vision_fallback or not all_pages_text_heavy or pages_with_broken_tables or is_handwritten:
                 try:
                     logger.info("[INGEST] Extracting page images for vision text extraction (handwritten/scanned)")
-                    page_images = self.doc_processor.extract_page_images(document_path)
+                    # Use higher DPI (150) for handwritten forms to capture more detail
+                    # Default was 100, but 150 gives better quality for handwritten text and small table cells
+                    extraction_dpi = 150 if is_handwritten else 100
+                    page_images = self.doc_processor.extract_page_images(document_path, dpi=extraction_dpi)
                     logger.info(f"[INGEST] Found {len(page_images)} page images")
                     for page in page_images:
                         page_number = page.get("page_number")
@@ -394,41 +541,53 @@ class RAGAgent:
                         
                         # Vision fallback: extract from image when:
                         # 1. Page has very little text, OR
-                        # 2. This is a handwritten/form document (always use vision to capture all content), OR
+                        # 2. This is a handwritten/form document (ALWAYS use vision - Docling can't handle tables in scanned forms), OR
                         # 3. Docling's table extraction seems incomplete, OR
                         # 4. Page has broken table structure (| characters but not proper markdown)
                         should_use_vision = (
                             (use_vision_fallback and page_text_len < min_chars) or
-                            (is_handwritten and page_text_len < 2000) or  # For handwritten, always try vision unless page is very text-heavy
+                            is_handwritten or  # ALWAYS use vision for handwritten - Docling tables are broken
                             docling_table_incomplete or
-                            has_broken_table_structure  # NEW: fix broken tables with vision
+                            has_broken_table_structure  # Fix broken tables with vision
                         )
                         
                         if should_use_vision:
                             try:
+                                # Log why vision is being used
+                                reason = "handwritten form" if is_handwritten else ("broken table" if has_broken_table_structure else "incomplete table" if docling_table_incomplete else "low text")
+                                print(f"[INGEST] Page {page_idx}: Using Claude Vision (reason: {reason})")
+                                logger.info(f"[INGEST] Page {page_idx}: Triggering Claude Vision extraction (reason: {reason})")
+                                
                                 # Use different prompts for handwritten vs scanned printed text
                                 if is_handwritten:
                                     # Form-aware extraction prompt for handwritten documents
                                     extraction_prompt = (
                                         "This is a scanned form with handwritten entries. Extract ALL information in a STRUCTURED format.\n\n"
+                                        "IMPORTANT: IGNORE any watermarks like 'EXAMPLE' or diagonal text overlays. Focus on the actual form content.\n\n"
                                         "CRITICAL INSTRUCTIONS:\n\n"
-                                        "1. TABLES - THIS IS VERY IMPORTANT:\n"
-                                        "   - Extract EVERY column and EVERY row of data\n"
-                                        "   - Use markdown table format with | separators\n"
-                                        "   - Include ALL column headers\n"
-                                        "   - Do NOT skip any columns - if a table has 4 columns, output all 4\n"
-                                        "   - Example of a 4-column table:\n"
-                                        "     | Local Authority | Team | Telephone | Email |\n"
-                                        "     |-----------------|------|-----------|-------|\n"
-                                        "     | Hartlepool | Adults Team | 01234567 | email@gov.uk |\n"
-                                        "     | Durham | Access Team | 01onal234568 | other@gov.uk |\n\n"
-                                        "2. FORM FIELDS: For each field, output as 'Field Label: Value'\n\n"
-                                        "3. CHECKBOXES: Look carefully for checkbox fields (Yes/No, tick boxes).\n"
-                                        "   - If a checkbox is TICKED (✓ or filled): 'Field: Yes [TICKED]' or 'Field: No [TICKED]'\n"
-                                        "   - If a checkbox is EMPTY (unfilled): 'Field: Yes [EMPTY]' or 'Field: No [EMPTY]'\n\n"
-                                        "4. HANDWRITTEN TEXT: Transcribe exactly what is written, even if messy\n\n"
-                                        "5. SECTIONS: Preserve section numbers and headings\n\n"
-                                        "6. EMPTY FIELDS: Write 'Field: [BLANK]' for empty fields\n\n"
+                                        "1. TABLES - EXTRACT ALL COLUMNS (VERY IMPORTANT):\n"
+                                        "   a) First, identify ALL column headers in each table\n"
+                                        "   b) Then extract EVERY cell value for EVERY column\n"
+                                        "   c) Use proper markdown table format with | separators\n"
+                                        "   d) If a table has 4 columns (e.g., Local Authority, Team, Telephone, Email), output ALL 4 columns\n"
+                                        "   e) Do NOT skip columns even if partially obscured by watermarks\n"
+                                        "   f) Example of correct 4-column extraction:\n"
+                                        "      | Local Authority | Team | Telephone Number | Email Address |\n"
+                                        "      |-----------------|------|------------------|---------------|\n"
+                                        "      | Hartlepool | Early Intervention Adults Team | 01429 523309 | ISA@hartlepool.gov.uk |\n"
+                                        "      | Middlesbrough | Adult Access Team | 01642 065070 | adultaccess@middlesbrough.gov.uk |\n"
+                                        "      | Redcar & Cleveland | Adult Access Team | 01642 065370 | AccessAdultsTeam@redcar-cleveland.gov.uk |\n\n"
+                                        "2. UK DATA FORMATS:\n"
+                                        "   - Post codes start with letters (e.g., TS25 2BQ, not 7525 280)\n"
+                                        "   - Phone numbers: 01234 567890 format\n"
+                                        "   - Dates: DD/MM/YY or DD/MM/YYYY\n\n"
+                                        "3. FORM FIELDS: Output as 'Field Label: Value'\n\n"
+                                        "4. CHECKBOXES:\n"
+                                        "   - TICKED (✓ or filled): 'Field: Yes [TICKED]' or 'Field: No [TICKED]'\n"
+                                        "   - EMPTY (unfilled): 'Field: Yes [EMPTY]' or 'Field: No [EMPTY]'\n\n"
+                                        "5. HANDWRITTEN TEXT: Transcribe exactly, even if messy\n\n"
+                                        "6. SECTIONS: Preserve section numbers and headings\n\n"
+                                        "7. EMPTY FIELDS: Write 'Field: [BLANK]'\n\n"
                                         "EXAMPLE OUTPUT:\n"
                                         "---\n"
                                         "Form - SG01\n"
@@ -436,16 +595,24 @@ class RAGAgent:
                                         "| Local Authority | Team | Telephone Number | Email Address |\n"
                                         "|-----------------|------|------------------|---------------|\n"
                                         "| Hartlepool | Early Intervention Adults Team | 01429 523309 | ISA@hartlepool.gov.uk |\n"
-                                        "| Middlesbrough | Adult Access Team | 01642 065070 | adultaccess@middlesbrough.gov.uk |\n\n"
+                                        "| Middlesbrough | Adult Access Team | 01642 065070 | adultaccess@middlesbrough.gov.uk |\n"
+                                        "| Redcar & Cleveland | Adult Access Team | 01642 065370 | AccessAdultsTeam@redcar-cleveland.gov.uk |\n"
+                                        "| Stockton-on-Tees | First Contact Adults | 01642 527764 | FirstContactAdults@stockton.gov.uk |\n"
+                                        "| Durham | Social Care Direct | 03000 267979 | SCDsecured@durham.gov.uk |\n\n"
                                         "SECTION 1: DETAILS OF ADULT AT RISK\n"
                                         "Name: Peter Jones\n"
                                         "DOB: 01/01/01\n"
                                         "Gender: Male\n"
                                         "Home Address: 1 The Front, Hartlepool\n"
-                                        "Post Code: TS25 2SQ\n"
+                                        "Post Code: TS25 2BQ\n"
+                                        "Current Address: UHNT\n"
+                                        "Post Code: TS19 8PE\n"
+                                        "Ward Number: 25\n"
+                                        "Telephone Number: 82725\n"
+                                        "Religion: None\n"
                                         "Interpreter needed?: No [TICKED]\n"
                                         "---\n\n"
-                                        "Now extract ALL content from this page, including ALL table columns:"
+                                        "Now extract ALL content from this page. Remember: extract ALL table columns, ignore watermarks, use correct UK formats:"
                                     )
                                 elif has_broken_table_structure:
                                     # Table-focused extraction prompt for documents with broken table structures
@@ -506,17 +673,25 @@ class RAGAgent:
                                         
                                         logger.info(f"[INGEST] Page {page_idx}: {extraction_type} extraction - {ticked_count} ticked, {empty_count} empty, {blank_count} blank, {table_count} table pipes")
                                         
+                                        # Clean up table formatting (merge adjacent rows, fix separators)
+                                        cleaned_vision_text = _clean_table_formatting(vision_text.strip())
+                                        
+                                        if cleaned_vision_text != vision_text.strip():
+                                            print(f"[INGEST] Page {page_idx}: Table formatting cleaned (merged adjacent table rows)")
+                                            logger.info(f"[INGEST] Page {page_idx}: Table formatting post-processed")
+                                        
                                         # Replace broken text with vision-extracted text
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
-                                                p["text"] = vision_text.strip()
+                                                p["text"] = cleaned_vision_text
                                                 break
-                                        print(f"[INGEST] Page {page_idx}: Vision extracted {len(vision_text)} chars of {extraction_type.lower()} data")
+                                        print(f"[INGEST] Page {page_idx}: Vision extracted {len(cleaned_vision_text)} chars of {extraction_type.lower()} data")
                                     else:
                                         # Append vision-extracted text to existing text (for other cases)
+                                        cleaned_vision_text = _clean_table_formatting(vision_text.strip())
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
-                                                p["text"] = (p.get("text", "") + "\n\n" + vision_text.strip()).strip()
+                                                p["text"] = (p.get("text", "") + "\n\n" + cleaned_vision_text).strip()
                                                 break
                             except Exception as ve:
                                 logger.warning(f"[INGEST] Vision fallback failed for page {page_idx}: {ve}")

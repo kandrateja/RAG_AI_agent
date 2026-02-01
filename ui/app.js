@@ -333,13 +333,25 @@ function renderMarkdown(text) {
   if (!text) return "-";
   
   // First, extract and render tables before escaping HTML
+  // Pattern 1: Standard table (header, separator, data rows)
   const tableRegex = /(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/g;
+  // Pattern 2: Orphan table rows (data rows followed by separator, or just consecutive pipe rows)
+  const orphanTableRegex = /(\|[^\n]+\|\n\|[-:\s|]+\|(?:\n|$))/g;
+  // Pattern 3: Single/consecutive pipe-delimited rows without separator
+  const pipeRowsRegex = /(\|[^\n]+\|\n(?:\|[^\n]+\|\n)*\|[^\n]+\|)(?=\n[^|]|\n*$)/g;
+  
   const tables = [];
   let tableIndex = 0;
   
-  // Replace tables with placeholders
+  // Replace standard tables with placeholders
   let processedText = text.replace(tableRegex, (match) => {
     tables.push(renderTable(match));
+    return `__TABLE_PLACEHOLDER_${tableIndex++}__`;
+  });
+  
+  // Replace orphan tables (data + separator) - render as simple table rows
+  processedText = processedText.replace(orphanTableRegex, (match) => {
+    tables.push(renderOrphanTable(match));
     return `__TABLE_PLACEHOLDER_${tableIndex++}__`;
   });
   
@@ -379,6 +391,31 @@ function renderTable(tableText) {
     html += `<tr class="${rowClass}">`;
     cells.forEach(cell => {
       html += `<${tag}>${escapeHtml(cell.trim())}</${tag}>`;
+    });
+    html += "</tr>";
+  });
+  
+  html += "</table>";
+  return html;
+}
+
+function renderOrphanTable(tableText) {
+  // Handle orphan table rows (data row followed by separator, or just pipe-delimited rows)
+  const lines = tableText.trim().split("\n").filter(l => l.trim());
+  if (lines.length < 1) return escapeHtml(tableText);
+  
+  let html = '<table class="md-table">';
+  
+  lines.forEach((line) => {
+    // Skip separator row (|---|---|)
+    if (/^\|[\s-:|]+\|$/.test(line)) return;
+    
+    const cells = line.split("|").filter((c, i, arr) => i > 0 && i < arr.length - 1);
+    if (cells.length === 0) return;
+    
+    html += '<tr>';
+    cells.forEach(cell => {
+      html += `<td>${escapeHtml(cell.trim())}</td>`;
     });
     html += "</tr>";
   });
