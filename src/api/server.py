@@ -57,11 +57,13 @@ class Citation(BaseModel):
     doc_id: str
     doc_name: Optional[str] = None
     page_number: Optional[int] = None
+    figure_index: Optional[int] = None  # For images: which figure on this page
     similarity: Optional[float] = None
     semantic_score: Optional[float] = None
     keyword_score: Optional[float] = None
     content_type: Optional[str] = "text"  # "text" or "image"
-    source_label: Optional[str] = None  # "Figure 1", etc. for images
+    score_type: Optional[str] = "semantic"  # "semantic" for text, "visual" for images
+    source_label: Optional[str] = None  # "Page 3, Figure 2" for images
 
 
 class RetrievedChunk(BaseModel):
@@ -272,15 +274,21 @@ def query_rag(request: QueryRequest) -> QueryResponse:
         # Format citations
         citations = []
         for cit in result.get("citations", []):
+            content_type = cit.get("content_type", "text")
+            # Use "visual" score type for images, "semantic" for text
+            score_type = "visual" if content_type == "image" else "semantic"
+            
             citations.append(Citation(
                 chunk_id=cit.get("chunk_id", "unknown"),
                 doc_id=cit.get("doc_id", "unknown"),
                 doc_name=cit.get("doc_name"),
                 page_number=cit.get("page_number"),
+                figure_index=cit.get("figure_index"),
                 similarity=cit.get("similarity"),
                 semantic_score=cit.get("semantic_score"),
                 keyword_score=cit.get("keyword_score"),
-                content_type=cit.get("content_type", "text"),
+                content_type=content_type,
+                score_type=score_type,
                 source_label=cit.get("source_label"),
             ))
 

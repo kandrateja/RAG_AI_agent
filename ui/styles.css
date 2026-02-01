@@ -220,3 +220,36 @@ pre { background: #0b1220; color: #e5e7eb; padding: 10px; border-radius: 8px; wh
   .app { grid-template-columns: 220px 1fr; }
   .figure-card { max-width: 200px; }
 }
+
+/* Markdown Tables */
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.md-table th,
+.md-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.md-table th {
+  background: #f1f5f9;
+  font-weight: 600;
+  color: #334155;
+}
+.md-table tr:last-child td {
+  border-bottom: none;
+}
+.md-table tr:hover td {
+  background: #f8fafc;
+}
+.md-table tr.header:hover th {
+  background: #f1f5f9;
+}

@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     surf_max_results: int = 5
 
     # Application
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
+    chunk_size: int = 1500
+    chunk_overlap: int = 300
     max_tokens: int = 4096
     temperature: float = 0.7
     ingestion_vision_fallback_min_chars: int = 50

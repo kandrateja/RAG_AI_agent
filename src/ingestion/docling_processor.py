@@ -97,31 +97,44 @@ def _text_from_item(item: Any) -> str:
                 grid: Dict[int, Dict[int, str]] = {}
                 max_col = 0
                 max_row = 0
+                col_widths: Dict[int, int] = {}  # Track max width per column
+                
                 for c in cells:
                     r = getattr(c, "start_row_offset_idx", 0)
                     col = getattr(c, "start_col_offset_idx", 0)
-                    txt = getattr(c, "text", "") or ""
+                    txt = (getattr(c, "text", "") or "").strip()
+                    # Clean up text - replace newlines with spaces for table cells
+                    txt = " ".join(txt.split())
                     if r not in grid:
                         grid[r] = {}
                     grid[r][col] = txt
                     max_col = max(max_col, col)
                     max_row = max(max_row, r)
+                    # Track column width
+                    col_widths[col] = max(col_widths.get(col, 3), len(txt))
                 
                 # Debug: log table dimensions
                 print(f"[DOCLING TABLE] Found {len(cells)} cells in {max_row+1} rows x {max_col+1} cols")
                 
-                # Build table with proper column alignment
+                # Build proper markdown table with header separator
                 lines = []
                 for row_idx in sorted(grid.keys()):
                     row_cells = []
                     for col_idx in range(max_col + 1):
                         cell_text = grid[row_idx].get(col_idx, "")
-                        row_cells.append(cell_text)
-                    lines.append(" | ".join(row_cells))
+                        # Pad cell to column width for alignment
+                        padded = cell_text.ljust(col_widths.get(col_idx, 3))
+                        row_cells.append(padded)
+                    lines.append("| " + " | ".join(row_cells) + " |")
+                    
+                    # Add separator after first row (header)
+                    if row_idx == 0:
+                        sep_cells = ["-" * col_widths.get(c, 3) for c in range(max_col + 1)]
+                        lines.append("| " + " | ".join(sep_cells) + " |")
                 
                 result = "\n".join(lines)
                 if max_col > 0:  # Multi-column table
-                    print(f"[DOCLING TABLE] Extracted multi-column table: {len(lines)} rows")
+                    print(f"[DOCLING TABLE] Extracted markdown table: {len(lines)} lines")
                 return result
             except Exception as e:
                 print(f"[DOCLING TABLE] Cell extraction failed: {e}")
@@ -131,11 +144,29 @@ def _text_from_item(item: Any) -> str:
         if grid_data:
             try:
                 lines = []
+                col_widths = {}
+                # First pass: calculate column widths
                 for row in grid_data:
-                    row_texts = [str(cell) if cell else "" for cell in row]
-                    lines.append(" | ".join(row_texts))
+                    for col_idx, cell in enumerate(row):
+                        txt = str(cell).strip() if cell else ""
+                        col_widths[col_idx] = max(col_widths.get(col_idx, 3), len(txt))
+                
+                # Second pass: build table
+                for row_idx, row in enumerate(grid_data):
+                    row_texts = []
+                    for col_idx, cell in enumerate(row):
+                        txt = str(cell).strip() if cell else ""
+                        padded = txt.ljust(col_widths.get(col_idx, 3))
+                        row_texts.append(padded)
+                    lines.append("| " + " | ".join(row_texts) + " |")
+                    
+                    # Add separator after header
+                    if row_idx == 0:
+                        sep_cells = ["-" * col_widths.get(c, 3) for c in range(len(row))]
+                        lines.append("| " + " | ".join(sep_cells) + " |")
+                
                 if lines:
-                    print(f"[DOCLING TABLE] Extracted from grid: {len(lines)} rows")
+                    print(f"[DOCLING TABLE] Extracted from grid: {len(lines)} lines")
                     return "\n".join(lines)
             except Exception as e:
                 print(f"[DOCLING TABLE] Grid extraction failed: {e}")
@@ -151,15 +182,120 @@ def _text_from_item(item: Any) -> str:
         except Exception:
             pass
         
-        # Method 4: Fallback to simple cell text concatenation
+        # Method 4: Fallback to structured text representation
         if cells:
             try:
-                all_text = " | ".join(getattr(c, "text", "") or "" for c in cells)
-                return all_text
+                # Group cells by row for better readability
+                rows_dict: Dict[int, List[str]] = {}
+                for c in cells:
+                    r = getattr(c, "start_row_offset_idx", 0)
+                    txt = (getattr(c, "text", "") or "").strip()
+                    if r not in rows_dict:
+                        rows_dict[r] = []
+                    rows_dict[r].append(txt)
+                
+                lines = []
+                for row_idx in sorted(rows_dict.keys()):
+                    lines.append(" | ".join(rows_dict[row_idx]))
+                return "\n".join(lines)
             except Exception:
                 pass
     
     return ""
+
+
+def _postprocess_table_text(text: str) -> str:
+    """
+    Post-process text that contains table-like patterns (| separators).
+    Converts unstructured table text into proper markdown tables.
+    """
+    if "|" not in text:
+        return text
+    
+    lines = text.split("\n")
+    result_lines = []
+    table_buffer = []
+    in_table = False
+    
+    for line in lines:
+        stripped = line.strip()
+        # Check if this line looks like a table row (has | separators)
+        pipe_count = stripped.count("|")
+        
+        # A table row should have at least one | and some text content
+        if pipe_count >= 1 and len(stripped) > 3:
+            # Check if it's NOT already a markdown table separator
+            if stripped.replace("|", "").replace("-", "").replace(" ", "").replace(":", "") == "":
+                # This is a separator line, keep it
+                result_lines.append(line)
+                continue
+            
+            in_table = True
+            table_buffer.append(stripped)
+        else:
+            if in_table and table_buffer:
+                # End of table section - process the buffer
+                formatted_table = _format_table_buffer(table_buffer)
+                result_lines.extend(formatted_table)
+                table_buffer = []
+            in_table = False
+            result_lines.append(line)
+    
+    # Process any remaining table buffer
+    if table_buffer:
+        formatted_table = _format_table_buffer(table_buffer)
+        result_lines.extend(formatted_table)
+    
+    return "\n".join(result_lines)
+
+
+def _format_table_buffer(lines: List[str]) -> List[str]:
+    """
+    Format a list of table-like lines into proper markdown table format.
+    """
+    if not lines:
+        return []
+    
+    # Parse each line into cells
+    rows = []
+    max_cols = 0
+    
+    for line in lines:
+        # Split by | and clean up
+        parts = line.split("|")
+        cells = [p.strip() for p in parts if p.strip()]  # Remove empty cells
+        if cells:
+            rows.append(cells)
+            max_cols = max(max_cols, len(cells))
+    
+    if not rows or max_cols == 0:
+        return lines  # Return original if parsing failed
+    
+    # Normalize rows to have same number of columns
+    for row in rows:
+        while len(row) < max_cols:
+            row.append("")
+    
+    # Calculate column widths
+    col_widths = [3] * max_cols  # Minimum width of 3
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < max_cols:
+                col_widths[i] = max(col_widths[i], len(cell))
+    
+    # Build formatted table
+    formatted = []
+    for idx, row in enumerate(rows):
+        # Pad each cell to column width
+        padded_cells = [cell.ljust(col_widths[i]) for i, cell in enumerate(row)]
+        formatted.append("| " + " | ".join(padded_cells) + " |")
+        
+        # Add separator after first row (header)
+        if idx == 0:
+            sep_cells = ["-" * col_widths[i] for i in range(max_cols)]
+            formatted.append("| " + " | ".join(sep_cells) + " |")
+    
+    return formatted
 
 
 def _build_pages_from_document(document: Any) -> List[Dict[str, Any]]:
@@ -210,9 +346,13 @@ def _build_pages_from_document(document: Any) -> List[Dict[str, Any]]:
 
     pages = []
     for pno in sorted(page_texts.keys()):
+        # Combine all text for this page
+        raw_text = "\n\n".join(page_texts[pno])
+        # Post-process to format table-like text as proper markdown tables
+        formatted_text = _postprocess_table_text(raw_text)
         pages.append({
             "page_number": pno,
-            "text": "\n\n".join(page_texts[pno])
+            "text": formatted_text
         })
     return pages
 
@@ -300,11 +440,12 @@ class DoclingProcessor:
 
         # Use export_to_markdown for better table formatting
         full_md = doc.export_to_markdown() if hasattr(doc, "export_to_markdown") else ""
-        full_text = (full_md or "").strip()
+        # Post-process to format table-like text as proper markdown tables
+        full_text = _postprocess_table_text((full_md or "").strip())
         
         # Debug: log markdown output for tables
-        if "|" in full_md:
-            table_lines = [l for l in full_md.split("\n") if "|" in l]
+        if "|" in full_text:
+            table_lines = [l for l in full_text.split("\n") if "|" in l]
             print(f"[DOCLING] Markdown export contains {len(table_lines)} table-formatted lines")
             # Show first few table lines
             for tl in table_lines[:5]:
@@ -711,13 +852,21 @@ class DoclingProcessor:
         document_path: str,
         pipeline_hint: Optional[str] = None,
         max_size_bytes: int = 2_000_000,
+        dpi: int = 150,
+        min_figure_size: int = 50,
     ) -> List[Dict]:
         """
-        Extract figures/diagrams using Docling's figure detection.
-        This detects actual figures (charts, diagrams, images) and renders just those regions.
+        Extract figures/diagrams using Docling's figure detection with iterate_items().
+        This detects actual figures (charts, diagrams, images) and renders just those regions,
+        NOT the full page. Handles BOTTOMLEFT coordinate origin correctly.
         
-        Returns:
-            List of {"page_number", "image_bytes", "caption", "bbox"}
+        Returns figures sorted by page_number, then by figure_index (vertical position).
+        Each figure has:
+            - page_number: 1-indexed page
+            - figure_index: 1-indexed figure number on that page (top to bottom)
+            - image_bytes: PNG bytes of just the figure
+            - width, height: dimensions in points
+            - format: "png"
         """
         try:
             import fitz
@@ -727,115 +876,106 @@ class DoclingProcessor:
             if not path.exists():
                 raise FileNotFoundError(f"Document not found: {document_path}")
             
-            # Use Docling to detect figures
+            # Use Docling to detect figures via iterate_items (works with newer Docling)
             hint = (pipeline_hint or "auto").lower().strip()
             use_ocr = hint in ("handwritten",)
             converter = self._converter_ocr if use_ocr else self._converter
             
-            logger.info(f"[Docling] Detecting figures in {path.name}")
+            logger.info(f"[Docling] Detecting figures in {path.name} using iterate_items()")
             result = converter.convert(str(path))
             doc_obj = result.document
             
-            # Get pictures/figures from Docling document
-            pictures = getattr(doc_obj, "pictures", []) or []
+            # Open PDF with PyMuPDF for rendering and coordinate conversion
+            pdf_doc = fitz.open(document_path)
             
-            # Also check for 'figures' attribute (different Docling versions)
-            if not pictures:
-                pictures = getattr(doc_obj, "figures", []) or []
+            # Get page heights for BOTTOMLEFT to TOPLEFT conversion
+            page_heights = {}
+            for page_idx in range(len(pdf_doc)):
+                page_heights[page_idx + 1] = pdf_doc[page_idx].rect.height
             
-            if not pictures:
-                logger.info("[Docling] No figures detected by Docling, falling back to embedded images")
+            # Collect PictureItems from Docling using iterate_items
+            picture_items = []
+            for item, level in doc_obj.iterate_items():
+                item_type = type(item).__name__
+                if "Picture" in item_type or "Figure" in item_type:
+                    if hasattr(item, 'prov') and item.prov:
+                        for prov in item.prov:
+                            if hasattr(prov, 'bbox') and hasattr(prov, 'page_no'):
+                                picture_items.append({
+                                    "item": item,
+                                    "bbox": prov.bbox,
+                                    "page_no": prov.page_no
+                                })
+            
+            if not picture_items:
+                logger.info("[Docling] No figures detected via iterate_items, trying embedded images")
+                pdf_doc.close()
                 return self.extract_embedded_images(document_path, max_size_bytes)
             
-            logger.info(f"[Docling] Found {len(pictures)} figures")
+            logger.info(f"[Docling] Found {len(picture_items)} PictureItems")
             
-            # Open PDF with PyMuPDF to render figure regions
-            pdf_doc = fitz.open(document_path)
-            figures = []
+            # Extract each figure with proper coordinate conversion
+            raw_figures = []
             
-            for idx, pic in enumerate(pictures):
+            for idx, pic_info in enumerate(picture_items):
                 try:
-                    # Get bounding box and page
-                    bbox_info = _get_bbox_from_item(pic)
-                    page_no = _page_no_from_item(pic) or 1
+                    bbox = pic_info["bbox"]
+                    page_no = pic_info["page_no"]
                     
                     if page_no < 1 or page_no > len(pdf_doc):
                         logger.warning(f"Figure {idx} has invalid page {page_no}")
                         continue
                     
                     page = pdf_doc[page_no - 1]
-                    page_width = page.rect.width
                     page_height = page.rect.height
+                    page_width = page.rect.width
                     
-                    # Get caption if available
-                    caption = getattr(pic, "caption", None) or getattr(pic, "text", None) or ""
-                    if hasattr(caption, "text"):
-                        caption = caption.text
-                    
-                    # Get bounding box - handle different Docling formats
-                    x0, y0, x1, y1 = 0, 0, 0, 0
-                    
-                    if bbox_info:
-                        x0, y0 = bbox_info["x0"], bbox_info["y0"]
-                        x1, y1 = bbox_info["x1"], bbox_info["y1"]
+                    # Convert BOTTOMLEFT to TOPLEFT coordinates
+                    # In BOTTOMLEFT: y=0 at bottom, y increases upward, bbox.t > bbox.b
+                    # In TOPLEFT: y=0 at top, y increases downward
+                    if hasattr(bbox, 'l'):  # Docling BoundingBox object
+                        left = bbox.l
+                        right = bbox.r
+                        # Convert y: new_y = page_height - old_y
+                        top = page_height - bbox.t
+                        bottom = page_height - bbox.b
+                    elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                        left, t, right, b = bbox[0], bbox[1], bbox[2], bbox[3]
+                        top = page_height - t
+                        bottom = page_height - b
                     else:
-                        # Try to get bbox directly from prov
-                        prov = getattr(pic, "prov", []) or []
-                        for p in prov:
-                            bbox = getattr(p, "bbox", None)
-                            if bbox:
-                                # Try different bbox formats
-                                if hasattr(bbox, 'l'):
-                                    x0, y0, x1, y1 = bbox.l, bbox.t, bbox.r, bbox.b
-                                elif hasattr(bbox, 'x0'):
-                                    x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
-                                elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                                    x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
-                                break
+                        logger.warning(f"Figure {idx}: Unknown bbox format {bbox}")
+                        continue
                     
-                    logger.info(f"Figure {idx} raw bbox: ({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}) on page {page_no} ({page_width:.0f}x{page_height:.0f})")
+                    # Ensure top < bottom (proper TOPLEFT orientation)
+                    if top > bottom:
+                        top, bottom = bottom, top
                     
-                    # Validate and fix coordinates
-                    # Ensure x0 < x1 and y0 < y1
-                    if x0 > x1:
-                        x0, x1 = x1, x0
-                    if y0 > y1:
-                        y0, y1 = y1, y0
-                    
-                    # Check if coordinates are normalized (0-1) and scale to page size
-                    if x1 <= 1.0 and y1 <= 1.0 and x0 >= 0 and y0 >= 0:
-                        x0 = x0 * page_width
-                        y0 = y0 * page_height
-                        x1 = x1 * page_width
-                        y1 = y1 * page_height
-                        logger.info(f"Figure {idx} scaled bbox: ({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f})")
-                    
-                    # Ensure bbox is within page bounds
-                    padding = 10
-                    x0 = max(0, x0 - padding)
-                    y0 = max(0, y0 - padding)
-                    x1 = min(page_width, x1 + padding)
-                    y1 = min(page_height, y1 + padding)
+                    # Add small padding
+                    padding = 5
+                    x0 = max(0, left - padding)
+                    y0 = max(0, top - padding)
+                    x1 = min(page_width, right + padding)
+                    y1 = min(page_height, bottom + padding)
                     
                     # Validate dimensions
                     width = x1 - x0
                     height = y1 - y0
-                    if width < 50 or height < 50:
-                        logger.warning(f"Figure {idx} too small: {width:.0f}x{height:.0f}, skipping")
+                    
+                    if width < min_figure_size or height < min_figure_size:
+                        logger.info(f"[Docling] Figure {idx} too small ({width:.0f}x{height:.0f}), skipping")
                         continue
                     
+                    # Render figure region
                     clip_rect = fitz.Rect(x0, y0, x1, y1)
-                    
-                    # Validate the rect is proper
                     if clip_rect.is_empty or clip_rect.is_infinite:
                         logger.warning(f"Figure {idx} has invalid rect, skipping")
                         continue
                     
-                    # Render just the figure region at high resolution
-                    mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for clarity
+                    mat = fitz.Matrix(dpi / 72, dpi / 72)
                     pix = page.get_pixmap(matrix=mat, clip=clip_rect)
                     
-                    if pix.width < 10 or pix.height < 10:
+                    if pix.width < 20 or pix.height < 20:
                         logger.warning(f"Figure {idx} rendered too small, skipping")
                         continue
                     
@@ -854,16 +994,18 @@ class DoclingProcessor:
                                 image_bytes = buffer.getvalue()
                                 break
                     
-                    figures.append({
+                    raw_figures.append({
                         "page_number": page_no,
                         "image_bytes": image_bytes,
-                        "caption": str(caption)[:500] if caption else "",
-                        "width": x1 - x0,
-                        "height": y1 - y0,
-                        "position_y": y0,
+                        "width": width,
+                        "height": height,
+                        "position_y": y0,  # For sorting (top to bottom)
                         "format": "png",
+                        "pixel_width": pix.width,
+                        "pixel_height": pix.height,
                     })
-                    logger.info(f"[Docling] Extracted figure {idx+1} from page {page_no}: {x1-x0:.0f}x{y1-y0:.0f}")
+                    
+                    logger.info(f"[Docling] Extracted figure from page {page_no}: {pix.width}x{pix.height}px")
                     
                 except Exception as e:
                     logger.warning(f"Could not extract figure {idx}: {e}")
@@ -871,15 +1013,52 @@ class DoclingProcessor:
             
             pdf_doc.close()
             
-            if not figures:
-                logger.info("[Docling] No figures could be extracted, trying drawing detection")
+            if not raw_figures:
+                logger.info("[Docling] No figures extracted, trying drawing detection")
                 return self._extract_diagrams_from_drawings(document_path, max_size_bytes)
             
-            logger.info(f"[Docling] Successfully extracted {len(figures)} figures")
+            # Sort figures by page_number, then by position_y (top to bottom)
+            raw_figures.sort(key=lambda f: (f["page_number"], f["position_y"]))
+            
+            # Assign figure_index per page (1-indexed, in order from top to bottom)
+            figures = []
+            current_page = None
+            page_figure_count = 0
+            
+            for fig in raw_figures:
+                if fig["page_number"] != current_page:
+                    current_page = fig["page_number"]
+                    page_figure_count = 0
+                
+                page_figure_count += 1
+                
+                figures.append({
+                    "page_number": fig["page_number"],
+                    "figure_index": page_figure_count,  # 1-indexed figure on this page
+                    "image_bytes": fig["image_bytes"],
+                    "width": fig["width"],
+                    "height": fig["height"],
+                    "pixel_width": fig["pixel_width"],
+                    "pixel_height": fig["pixel_height"],
+                    "format": fig["format"],
+                })
+            
+            # Log summary
+            pages_with_figures = {}
+            for f in figures:
+                pg = f["page_number"]
+                pages_with_figures[pg] = pages_with_figures.get(pg, 0) + 1
+            
+            logger.info(f"[Docling] Extracted {len(figures)} figures from {len(pages_with_figures)} pages")
+            for pg, count in sorted(pages_with_figures.items()):
+                logger.info(f"  Page {pg}: {count} figure(s)")
+            
             return figures
             
         except Exception as e:
             logger.error(f"Error extracting figures with Docling: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback to drawing detection
             return self._extract_diagrams_from_drawings(document_path, max_size_bytes)
 

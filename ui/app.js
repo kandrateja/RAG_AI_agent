@@ -214,8 +214,12 @@ function appendMessage(role, text, meta) {
           if (combined !== null && combined !== undefined) {
             const scoreLine = document.createElement("div");
             scoreLine.className = "meta-line";
+            // Use "visual similarity" for images, "semantic + keyword" for text
+            const scoreLabel = c.content_type === "image" 
+              ? "visual similarity" 
+              : "semantic + keyword";
             scoreLine.textContent =
-              `Hybrid score: ${combined.toFixed(3)} (semantic + keyword)`;
+              `Hybrid score: ${combined.toFixed(3)} (${scoreLabel})`;
             li.appendChild(scoreLine);
           }
           li.appendChild(docLine);
@@ -327,14 +331,60 @@ function escapeHtml(text) {
 
 function renderMarkdown(text) {
   if (!text) return "-";
-  let html = escapeHtml(text);
+  
+  // First, extract and render tables before escaping HTML
+  const tableRegex = /(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/g;
+  const tables = [];
+  let tableIndex = 0;
+  
+  // Replace tables with placeholders
+  let processedText = text.replace(tableRegex, (match) => {
+    tables.push(renderTable(match));
+    return `__TABLE_PLACEHOLDER_${tableIndex++}__`;
+  });
+  
+  // Now escape HTML for the rest
+  let html = escapeHtml(processedText);
+  
+  // Restore tables (they're already HTML)
+  tables.forEach((tableHtml, i) => {
+    html = html.replace(`__TABLE_PLACEHOLDER_${i}__`, tableHtml);
+  });
+  
+  // Handle other markdown
   html = html.replace(/^### (.*)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^## (.*)$/gm, "<h3>$1</h3>");
   html = html.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
   html = html.replace(/^\- (.*)$/gm, "<li>$1</li>");
   html = html.replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>");
   html = html.replace(/\n{2,}/g, "</div><div class=\"section\">");
   return `<div class="section">${html}</div>`;
+}
+
+function renderTable(tableText) {
+  const lines = tableText.trim().split("\n").filter(l => l.trim());
+  if (lines.length < 2) return escapeHtml(tableText);
+  
+  let html = '<table class="md-table">';
+  
+  lines.forEach((line, idx) => {
+    // Skip separator row (|---|---|)
+    if (/^\|[\s-:|]+\|$/.test(line)) return;
+    
+    const cells = line.split("|").filter((c, i, arr) => i > 0 && i < arr.length - 1);
+    const tag = idx === 0 ? "th" : "td";
+    const rowClass = idx === 0 ? "header" : "";
+    
+    html += `<tr class="${rowClass}">`;
+    cells.forEach(cell => {
+      html += `<${tag}>${escapeHtml(cell.trim())}</${tag}>`;
+    });
+    html += "</tr>";
+  });
+  
+  html += "</table>";
+  return html;
 }
 
 function getActiveConversation() {

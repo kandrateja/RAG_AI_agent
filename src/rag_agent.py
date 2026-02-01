@@ -283,6 +283,65 @@ class RAGAgent:
             # For these: use Docling text extraction + page-level multimodal image embeddings
             is_text_image_document = False
             pages_with_images: List[int] = []
+            pages_with_broken_tables: List[int] = []
+            
+            # Helper function to detect broken tables
+            def _has_broken_table(text: str) -> bool:
+                """Check if text has table-like patterns but not proper markdown format."""
+                if "|" not in text:
+                    return False
+                
+                lines = text.split("\n")
+                lines_with_pipes = [l for l in lines if "|" in l and l.strip()]
+                
+                # Need at least 3 lines with pipes to be a table (header + data rows)
+                if len(lines_with_pipes) < 3:
+                    return False
+                
+                # Check if it's already a proper markdown table (has separator row)
+                has_separator = any(
+                    set(l.replace("|", "").replace("-", "").replace(" ", "").replace(":", "")) == set()
+                    for l in lines_with_pipes
+                )
+                if has_separator:
+                    return False  # Already proper markdown
+                
+                # Check for consistent pipe pattern (table rows have similar structure)
+                # Count pipes per line and check if they're consistent
+                pipe_counts = [l.count("|") for l in lines_with_pipes]
+                if not pipe_counts:
+                    return False
+                
+                # Most common pipe count should appear in at least 2 lines
+                from collections import Counter
+                pipe_counter = Counter(pipe_counts)
+                most_common_count, frequency = pipe_counter.most_common(1)[0]
+                
+                # Need at least 2 pipes per line (minimum 2-column table) and consistent pattern
+                if most_common_count < 2 or frequency < 2:
+                    return False
+                
+                # Additional check: pipes should be in consecutive or near-consecutive lines
+                # (tables are usually contiguous, not scattered)
+                pipe_line_indices = [i for i, l in enumerate(lines) if "|" in l and l.strip()]
+                if len(pipe_line_indices) >= 2:
+                    # Check if the lines are relatively close together (within 3 lines of each other)
+                    gaps = [pipe_line_indices[i+1] - pipe_line_indices[i] for i in range(len(pipe_line_indices)-1)]
+                    avg_gap = sum(gaps) / len(gaps)
+                    if avg_gap > 3:  # If average gap is more than 3 lines, probably not a table
+                        return False
+                
+                return True  # Likely a broken table
+            
+            # Check each page for broken tables
+            for p in pages:
+                if _has_broken_table(p.get("text", "")):
+                    pages_with_broken_tables.append(p.get("page_number", 0))
+            
+            if pages_with_broken_tables:
+                print(f"[INGEST] Pages with broken table structures: {pages_with_broken_tables}")
+                logger.info(f"[INGEST] Pages with broken tables detected: {pages_with_broken_tables}")
+            
             if not is_handwritten and not is_arabic_doc and self.use_titan_embeddings:
                 pages_with_images = self.doc_processor.get_pages_with_images(document_path)
                 if pages_with_images:
@@ -291,12 +350,16 @@ class RAGAgent:
                     print(f"[INGEST] Text+Image document detected. Using HYBRID approach:")
                     print(f"         - Text extraction via Docling → text embeddings")
                     print(f"         - Pages {pages_with_images} rendered as images → multimodal image embeddings")
-                    # For text+image docs: skip vision extraction, use page-level image embedding instead
-                    use_vision_fallback = False
-                    all_pages_text_heavy = True  # Skip vision block
+                    # For text+image docs: skip vision extraction UNLESS there are broken tables
+                    if not pages_with_broken_tables:
+                        use_vision_fallback = False
+                        all_pages_text_heavy = True  # Skip vision block
+                    else:
+                        print(f"[INGEST] BUT will use vision for broken table pages: {pages_with_broken_tables}")
             
             # Skip Step 3 entirely for text-only docs (e.g. 10-page Arabic): extract text only, no page-as-image
-            if use_vision_fallback or not all_pages_text_heavy:
+            # EXCEPTION: Process pages with broken tables even if document is otherwise text-heavy
+            if use_vision_fallback or not all_pages_text_heavy or pages_with_broken_tables:
                 try:
                     logger.info("[INGEST] Extracting page images for vision text extraction (handwritten/scanned)")
                     page_images = self.doc_processor.extract_page_images(document_path)
@@ -323,14 +386,22 @@ class RAGAgent:
                             page_text.count("|") < 10  # Should have many | for multi-column tables
                         )
                         
+                        # Check for broken table structure (use helper function defined earlier)
+                        has_broken_table_structure = _has_broken_table(page_text)
+                        if has_broken_table_structure:
+                            print(f"[INGEST] Page {page_idx}: Detected broken table structure (| without markdown format)")
+                            logger.info(f"[INGEST] Page {page_idx}: Broken table detected, will use vision")
+                        
                         # Vision fallback: extract from image when:
                         # 1. Page has very little text, OR
                         # 2. This is a handwritten/form document (always use vision to capture all content), OR
-                        # 3. Docling's table extraction seems incomplete
+                        # 3. Docling's table extraction seems incomplete, OR
+                        # 4. Page has broken table structure (| characters but not proper markdown)
                         should_use_vision = (
                             (use_vision_fallback and page_text_len < min_chars) or
                             (is_handwritten and page_text_len < 2000) or  # For handwritten, always try vision unless page is very text-heavy
-                            docling_table_incomplete
+                            docling_table_incomplete or
+                            has_broken_table_structure  # NEW: fix broken tables with vision
                         )
                         
                         if should_use_vision:
@@ -376,6 +447,27 @@ class RAGAgent:
                                         "---\n\n"
                                         "Now extract ALL content from this page, including ALL table columns:"
                                     )
+                                elif has_broken_table_structure:
+                                    # Table-focused extraction prompt for documents with broken table structures
+                                    extraction_prompt = (
+                                        "Extract all text from this page, with SPECIAL ATTENTION to TABLES.\n\n"
+                                        "CRITICAL TABLE INSTRUCTIONS:\n"
+                                        "1. Look carefully for any tables on this page\n"
+                                        "2. Extract tables in PROPER MARKDOWN FORMAT:\n"
+                                        "   - Start with header row: | Column 1 | Column 2 | Column 3 |\n"
+                                        "   - Add separator row: |----------|----------|----------|\n"
+                                        "   - Add data rows: | Data 1 | Data 2 | Data 3 |\n"
+                                        "3. Include ALL columns - do NOT skip any\n"
+                                        "4. Include ALL rows - do NOT skip any\n"
+                                        "5. Preserve exact cell content\n\n"
+                                        "EXAMPLE of a properly formatted table:\n"
+                                        "| Receptor Type | Rapidly Adapting | Slowly Adapting |\n"
+                                        "|---------------|------------------|------------------|\n"
+                                        "| Surface receptor | Meissner's corpuscle | Merkel's receptor |\n"
+                                        "| Deep receptor | Pacinian corpuscle | Ruffini's corpuscle |\n\n"
+                                        "For non-table text, preserve paragraphs and structure.\n"
+                                        "Now extract ALL content from this page:"
+                                    )
                                 else:
                                     extraction_prompt = (
                                         "Extract all text visible on this page as plain text. "
@@ -383,22 +475,26 @@ class RAGAgent:
                                         "Include handwritten or printed text in any language (e.g. Arabic, English)."
                                     )
                                 
+                                # Use more tokens for forms and tables
+                                max_tokens = 4096 if (is_handwritten or has_broken_table_structure) else 1024
+                                
                                 vision_text = self.llm_client.chat_completion_with_image(
                                     prompt=extraction_prompt,
                                     image_base64=image_b64,
                                     media_type=media_type,
-                                    max_completion_tokens=4096 if is_handwritten else 1024,  # Increased for detailed form extraction
+                                    max_completion_tokens=max_tokens,
                                 )
                                 if vision_text and vision_text.strip():
-                                    # For handwritten docs, replace OCR text entirely with vision text (vision is more accurate)
-                                    if is_handwritten:
+                                    # For handwritten docs OR broken tables: REPLACE text entirely (vision is more accurate)
+                                    if is_handwritten or has_broken_table_structure:
                                         # Log extraction stats for debugging
                                         ticked_count = vision_text.lower().count("[ticked]")
                                         empty_count = vision_text.lower().count("[empty]")
                                         blank_count = vision_text.lower().count("[blank]")
                                         table_count = vision_text.count("|")  # Count pipe characters for table detection
                                         
-                                        print(f"[INGEST] Page {page_idx}: Form extraction stats:")
+                                        extraction_type = "Form" if is_handwritten else "Table"
+                                        print(f"[INGEST] Page {page_idx}: {extraction_type} extraction stats:")
                                         print(f"  - Checkboxes: {ticked_count} ticked, {empty_count} empty")
                                         print(f"  - Blank fields: {blank_count}")
                                         print(f"  - Table columns (| chars): {table_count}")
@@ -408,16 +504,16 @@ class RAGAgent:
                                         preview = vision_text[:500].replace('\n', '\\n')
                                         print(f"[INGEST] Page {page_idx}: Preview: {preview}...")
                                         
-                                        logger.info(f"[INGEST] Page {page_idx}: Form extraction - {ticked_count} ticked, {empty_count} empty, {blank_count} blank, {table_count} table pipes")
+                                        logger.info(f"[INGEST] Page {page_idx}: {extraction_type} extraction - {ticked_count} ticked, {empty_count} empty, {blank_count} blank, {table_count} table pipes")
                                         
-                                        # Replace OCR text with vision-extracted text
+                                        # Replace broken text with vision-extracted text
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
                                                 p["text"] = vision_text.strip()
                                                 break
-                                        print(f"[INGEST] Page {page_idx}: Vision extracted {len(vision_text)} chars of form data")
+                                        print(f"[INGEST] Page {page_idx}: Vision extracted {len(vision_text)} chars of {extraction_type.lower()} data")
                                     else:
-                                        # Append vision-extracted text to existing text
+                                        # Append vision-extracted text to existing text (for other cases)
                                         for p in pages:
                                             if p.get("page_number") == page_idx:
                                                 p["text"] = (p.get("text", "") + "\n\n" + vision_text.strip()).strip()
@@ -466,21 +562,44 @@ class RAGAgent:
             avg_text_per_page = sum(len((p.get("text") or "").strip()) for p in pages) / len(pages) if pages else 0
             
             if self.use_titan_embeddings and is_text_image_document and pages_with_images:
-                # HYBRID APPROACH: Render pages with images as full page images
-                # This captures both the text layout AND the image content together
+                # FIGURE-ONLY APPROACH: Extract ONLY figures/diagrams, not full pages
+                # Text is already in text chunks, so we only embed the visual content
+                # This avoids duplication and creates focused embeddings
                 try:
-                    logger.info(f"[INGEST] TEXT+IMAGE: Rendering {len(pages_with_images)} pages as full images for multimodal embedding")
-                    print(f"[INGEST] Rendering pages {pages_with_images} as full page images...")
-                    embedded_images = self.doc_processor.extract_page_images(
+                    logger.info(f"[INGEST] TEXT+IMAGE: Extracting figures-only (not full pages) for multimodal embedding")
+                    print(f"[INGEST] Extracting figures-only from document (pages with images: {pages_with_images})...")
+                    
+                    # Use Docling's figure detection to extract only diagrams/charts
+                    figures = self.doc_processor.extract_figures_with_docling(
                         document_path,
-                        page_numbers=pages_with_images,
-                        dpi=150,  # Good balance of quality and size
+                        dpi=150,
+                        min_figure_size=50,
                     )
-                    logger.info(f"[INGEST] Rendered {len(embedded_images)} page images for multimodal embedding")
-                    print(f"[INGEST] Created {len(embedded_images)} page images for embedding")
+                    
+                    if figures:
+                        # Log the extracted figures by page
+                        page_figure_counts: Dict[int, int] = {}
+                        for fig in figures:
+                            pg = fig.get("page_number", 0)
+                            page_figure_counts[pg] = page_figure_counts.get(pg, 0) + 1
+                        
+                        logger.info(f"[INGEST] Extracted {len(figures)} figures from {len(page_figure_counts)} pages")
+                        for pg in sorted(page_figure_counts.keys()):
+                            logger.info(f"  Page {pg}: {page_figure_counts[pg]} figure(s)")
+                            print(f"[INGEST]   Page {pg}: {page_figure_counts[pg]} figure(s)")
+                        
+                        # Use figures as embedded_images for embedding
+                        embedded_images = figures
+                        print(f"[INGEST] Total: {len(figures)} figures extracted for embedding (text NOT duplicated)")
+                    else:
+                        logger.info("[INGEST] No figures detected by Docling, skipping image embedding")
+                        print("[INGEST] No figures detected - document may be text-only")
+                        
                 except Exception as e:
-                    logger.warning(f"[INGEST] Page image extraction failed: {e}")
-                    print(f"[INGEST] Warning: Could not render page images: {e}")
+                    logger.warning(f"[INGEST] Figure extraction failed: {e}")
+                    print(f"[INGEST] Warning: Could not extract figures: {e}")
+                    import traceback
+                    traceback.print_exc()
             elif self.use_titan_embeddings and is_arabic_doc:
                 logger.info("[INGEST] Arabic document: skipping image extraction (text-only)")
             elif self.use_titan_embeddings and is_handwritten:
@@ -594,19 +713,22 @@ class RAGAgent:
             # Step 5b: Generate embeddings for images (if using Titan Multimodal)
             image_embeddings: List[Dict] = []
             if self.use_titan_embeddings and embedded_images:
-                logger.info(f"[INGEST] Generating embeddings for {len(embedded_images)} images")
+                logger.info(f"[INGEST] Generating embeddings for {len(embedded_images)} figures")
                 try:
                     for img in embedded_images:
                         img_embedding = self.embedding_generator.embed_image(img["image_bytes"])
                         image_embeddings.append({
                             "page_number": img["page_number"],
+                            "figure_index": img.get("figure_index", 1),  # 1-indexed figure on this page
                             "embedding": img_embedding,
                             "image_b64": base64.b64encode(img["image_bytes"]).decode("utf-8"),
-                            "format": img.get("format", "jpeg"),
+                            "format": img.get("format", "png"),
+                            "pixel_width": img.get("pixel_width", 0),
+                            "pixel_height": img.get("pixel_height", 0),
                         })
-                    logger.info(f"[INGEST] Generated {len(image_embeddings)} image embeddings")
+                    logger.info(f"[INGEST] Generated {len(image_embeddings)} figure embeddings")
                 except Exception as e:
-                    logger.warning(f"[INGEST] Image embedding failed: {e}")
+                    logger.warning(f"[INGEST] Figure embedding failed: {e}")
             
             # Step 5: Store document + chunks in Postgres pgvector (primary KB)
             #         + create ChunkRef nodes in Neo4j to enable graph-time expansion
@@ -639,12 +761,21 @@ class RAGAgent:
                 
                 logger.info(f"[INGEST] Stored {len(stored_chunks)} text chunks in Postgres")
                 
-                # Store image embeddings (if using Titan Multimodal)
+                # Store figure embeddings (if using Titan Multimodal)
                 if image_embeddings:
                     for j, img_data in enumerate(image_embeddings):
-                        img_chunk_id = f"{doc_id}_img_{j}"
                         img_page = img_data["page_number"]
-                        img_text = f"[Image on page {img_page}]"  # Placeholder text for display
+                        fig_idx = img_data.get("figure_index", j + 1)
+                        
+                        # Chunk ID includes page and figure index for clarity
+                        img_chunk_id = f"{doc_id}_p{img_page}_fig{fig_idx}"
+                        
+                        # Descriptive text for display and search context
+                        pixel_w = img_data.get("pixel_width", 0)
+                        pixel_h = img_data.get("pixel_height", 0)
+                        img_text = f"[Figure {fig_idx} on page {img_page}]"
+                        if pixel_w and pixel_h:
+                            img_text = f"[Figure {fig_idx} on page {img_page} ({pixel_w}x{pixel_h}px)]"
                         
                         self.vector_store.upsert_chunk(
                             chunk_id=img_chunk_id,
@@ -659,10 +790,13 @@ class RAGAgent:
                         stored_chunks.append({
                             "chunk_id": img_chunk_id,
                             "page_number": img_page,
+                            "figure_index": fig_idx,
                             "content_type": "image",
                         })
+                        
+                        logger.info(f"[INGEST] Stored figure: page {img_page}, figure {fig_idx}")
                     
-                    logger.info(f"[INGEST] Stored {len(image_embeddings)} image chunks in Postgres")
+                    logger.info(f"[INGEST] Stored {len(image_embeddings)} figure chunks in Postgres")
                 
                 # Step 6: Store entities and relationships in graph
                 if entities:
@@ -900,29 +1034,44 @@ class RAGAgent:
         return routing
 
     def _format_citations(self, chunks: List[Dict]) -> List[Dict]:
-        """Format citations for retrieved chunks with content type for provenance"""
+        """Format citations for retrieved chunks with content type and figure info for provenance"""
         citations = []
-        figure_num = 0
         
         for chunk in chunks:
             content_type = chunk.get("content_type", "text")
+            page_num = chunk.get("page_number")
+            chunk_id = chunk.get("chunk_id", "unknown")
             
-            # Assign figure number for image chunks
+            # Extract figure info from chunk_id (format: doc_pX_figY)
             source_label = None
+            figure_index = None
             if content_type == "image":
-                figure_num += 1
-                source_label = f"Figure {figure_num}"
+                # Try to extract figure index from chunk_id
+                if "_fig" in chunk_id:
+                    try:
+                        fig_part = chunk_id.split("_fig")[-1]
+                        figure_index = int(fig_part) if fig_part.isdigit() else None
+                    except:
+                        pass
+                
+                if figure_index and page_num:
+                    source_label = f"Page {page_num}, Figure {figure_index}"
+                elif page_num:
+                    source_label = f"Figure on page {page_num}"
+                else:
+                    source_label = "Figure"
             
             citation = {
-                "chunk_id": chunk.get("chunk_id", "unknown"),
+                "chunk_id": chunk_id,
                 "doc_id": chunk.get("doc_id", "unknown"),
                 "doc_name": chunk.get("doc_name"),
-                "page_number": chunk.get("page_number"),
+                "page_number": page_num,
+                "figure_index": figure_index,  # NEW: specific figure on this page
                 "similarity": chunk.get("similarity"),
                 "semantic_score": chunk.get("semantic_score"),
                 "keyword_score": chunk.get("keyword_score"),
                 "content_type": content_type,  # "text" or "image"
-                "source_label": source_label,  # "Figure 1", "Figure 2", etc. for images
+                "source_label": source_label,  # "Page 3, Figure 2" for images
             }
             citations.append(citation)
         return citations
@@ -1084,9 +1233,20 @@ Respond with ONLY one word: "visual" if images/diagrams would help, or "text" if
                 # Always use JPEG after compression
                 media_type = "image/jpeg"
                 
+                # Get figure index if available (from chunk_id or stored)
+                fig_label = f"Figure {image_count}"
+                chunk_id = chunk.get("chunk_id", "")
+                # Extract figure index from chunk_id like "doc_p3_fig2"
+                if "_fig" in chunk_id:
+                    try:
+                        fig_num = chunk_id.split("_fig")[-1]
+                        fig_label = f"Page {page_num}, Figure {fig_num}"
+                    except:
+                        pass
+                
                 content_blocks.append({
                     "type": "text",
-                    "text": f"\n--- IMAGE SOURCE ---\n[Figure {image_count} from {doc_name}, Page {page_num}]\n"
+                    "text": f"\n--- FIGURE ---\n[{fig_label} from {doc_name}]\n"
                 })
                 content_blocks.append({
                     "type": "image",
@@ -1098,7 +1258,7 @@ Respond with ONLY one word: "visual" if images/diagrams would help, or "text" if
                 })
                 content_blocks.append({
                     "type": "text",
-                    "text": f"[End of Figure {image_count}]\n"
+                    "text": f"[End of {fig_label}]\n"
                 })
             else:
                 text_count += 1
@@ -1460,12 +1620,13 @@ INSTRUCTIONS:
                 "\n\n"
                 "FORMAT YOUR RESPONSE USING CLEAN MARKDOWN:\n"
                 "1. Start with a brief overview paragraph (2-3 sentences max)\n"
-                "2. Then use **Key Points:** as a header followed by bullet points:\n"
-                "   - Each bullet on its own line\n"
-                "   - Keep bullets concise and clear\n"
-                "   - Use sub-bullets if needed for details\n"
-                "3. End with **Summary:** followed by 1-2 sentence conclusion\n\n"
-                "IMPORTANT: Use proper line breaks between sections. Keep the response well-structured and easy to scan."
+                "2. TABLES: If the source contains a table, PRESERVE and DISPLAY it in markdown format:\n"
+                "   - Use | Column 1 | Column 2 | format\n"
+                "   - Include the header separator row |---|---|\n"
+                "   - Show ALL rows and columns from the original table\n"
+                "3. For non-table content, use **Key Points:** followed by bullet points\n"
+                "4. End with **Summary:** followed by 1-2 sentence conclusion\n\n"
+                "IMPORTANT: When user asks about a table, SHOW the actual table, don't convert it to bullets."
             )
 
             messages: List[Dict] = [{"role": "system", "content": system_prompt}]
@@ -1724,13 +1885,15 @@ CRITICAL RULES:
 
 FORMAT YOUR RESPONSE USING CLEAN MARKDOWN:
 1. Start with a brief overview paragraph (2-3 sentences max)
-2. Then use **Key Points:** as a header followed by bullet points:
-   - Each bullet on its own line
-   - Keep bullets concise and clear
-   - Reference specific figures/pages when relevant
-3. End with **Summary:** followed by 1-2 sentence conclusion
+2. TABLES: If the source contains a table, PRESERVE and DISPLAY it in markdown format:
+   - Use | Column 1 | Column 2 | format
+   - Include the header separator row |---|---|
+   - Show ALL rows and columns from the original table
+   - Do NOT convert tables to bullet points
+3. For non-table content, use **Key Points:** followed by bullet points
+4. End with **Summary:** followed by 1-2 sentence conclusion
 
-Use proper line breaks between sections. Keep the response well-structured and easy to scan.
+IMPORTANT: When user asks about a table or comparison, SHOW the actual table format, don't convert it to bullets.
 
 Answer the question based strictly on the provided context."""
                     
