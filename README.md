@@ -180,6 +180,33 @@ When using V1 with translation:
 3. English queries can retrieve Arabic documents
 4. Responses can be in Arabic or English based on the query language
 
+## 🎯 Smart Retrieval & Web Search Thresholds
+
+The system uses intelligent thresholds to decide when to use internal knowledge vs. web search:
+
+### Standard Queries (English)
+
+| Hybrid Score | Graph Confidence | Action |
+|--------------|------------------|--------|
+| **< 0.3** | Any | ✅ Web search (content not in KB) |
+| **0.3 - 0.7** | < 0.6 (low) | ✅ Web search (uncertain, graph weak) |
+| **0.3 - 0.7** | >= 0.6 (high) | ❌ Use internal (graph supports) |
+| **>= 0.7** | Any | ❌ Use internal (sufficient) |
+
+### Cross-Lingual Queries (Arabic)
+
+| Hybrid Score | Action |
+|--------------|--------|
+| **< 0.2** | ✅ Web search |
+| **0.2 - 0.4** | Check graph confidence |
+| **>= 0.4** | ❌ Use internal |
+
+### Frontend Indicators
+
+- **Vector ✓**: Retrieved chunks from vector database
+- **Graph ✓**: Expanded context via entity graph
+- **Web ✓**: Fetched external information from SERPAPI
+
 ## 📄 Supported Document Types
 
 | Type | Support | Processing Pipeline |

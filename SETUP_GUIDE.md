@@ -13,7 +13,7 @@ Before starting, ensure you have:
 - [ ] **AWS Account** with Bedrock access for:
   - Claude Sonnet 4 (LLM + Vision)
   - Titan Multimodal Embeddings (V1)
-  - Titan Text Embeddings (V2) - for multilingual support--optional
+  - Titan Text Embeddings (V2) - optional, for multilingual support
 - [ ] **SERPAPI Account** for web search (get key from https://serpapi.com/)
 - [ ] PDF documents to test with (scanned, handwritten, Arabic, or standard)
 
@@ -50,13 +50,12 @@ AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
 
 # ============================================
 # AWS TITAN EMBEDDINGS (Required)
-# Choose V1 only(manual by llm) or V2 for multilingual support(automatic)
 # ============================================
 USE_TITAN_EMBEDDINGS=true
 TITAN_EMBEDDING_MODEL_ID=amazon.titan-embed-image-v1
 
 # V2 for native multilingual (recommended for Arabic documents)
-USE_TITAN_V2_FOR_TEXT=true
+USE_TITAN_V2_FOR_TEXT=false
 
 # ============================================
 # NEO4J GRAPH DATABASE (Required)
@@ -81,7 +80,6 @@ SURF_MAX_RESULTS=5
 # ============================================
 # ARABIC / MULTILINGUAL SETTINGS
 # ============================================
-# If V2 is disabled, enable these for Arabic support via translation
 TRANSLATE_ARABIC_FOR_EMBEDDING=true
 USE_ARABIC_SENTENCE_CHUNKING=true
 
@@ -100,8 +98,6 @@ INGESTION_PIPELINE_HINT=auto
 | `USE_TITAN_V2_FOR_TEXT=true` | Multilingual documents | ✅ Native |
 | `USE_TITAN_V2_FOR_TEXT=false` + `TRANSLATE_ARABIC_FOR_EMBEDDING=true` | Cross-lingual demonstration | ✅ Via translation |
 | `USE_TITAN_V2_FOR_TEXT=false` + `TRANSLATE_ARABIC_FOR_EMBEDDING=false` | English only | ❌ |
-
-**Recommendation**: Use V2 for production Arabic support. Use V1+translation to demonstrate cross-lingual retrieval understanding.
 
 ---
 
@@ -150,13 +146,6 @@ docker-compose up -d postgres-rag neo4j-rag
 docker ps
 ```
 
-You should see:
-```
-CONTAINER ID   IMAGE                    STATUS          PORTS
-xxxx           pgvector/pgvector:pg16   Up (healthy)    0.0.0.0:5432->5432/tcp
-xxxx           neo4j:5                  Up (healthy)    0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
-```
-
 #### 3B.3 Create virtual environment and install dependencies
 
 ```bash
@@ -181,12 +170,6 @@ sudo apt-get install tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng
 
 ```bash
 uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
-```
-
-You should see:
-```
-[INIT] Titan Embeddings: V2 for text (multilingual), V1 for images
-INFO:     Uvicorn running on http://0.0.0.0:8000
 ```
 
 ---
@@ -223,12 +206,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 ### 5.3 Monitor Ingestion Logs
 
 Watch the terminal for:
-
 ```
 [INGEST] Processing document: example.pdf
 [INGEST] Extracted 10 pages of text
-[INGEST] Document detected as predominantly Arabic
-[INGEST] Arabic document → Titan V2 (native multilingual)  # or V1 with translation
 [INGEST] Created 25 chunks
 [INGEST] Stored in PostgreSQL and Neo4j
 ```
@@ -273,7 +253,32 @@ Look for:
 - `provenance: "internal"` - Answer from ingested documents
 - `citations` - List of sources with page numbers
 - `decision_trace.is_cross_lingual` - True for Arabic documents
-- `decision_trace.effective_high_threshold` - 0.4 for cross-lingual, 0.7 for same-language
+
+### 6.4 Understanding Retrieval Thresholds
+
+The system uses smart thresholds to decide when to use internal knowledge vs. web search:
+
+**Standard Queries (English):**
+
+| Hybrid Score | Graph Confidence | Result |
+|--------------|------------------|--------|
+| < 0.3 | Any | Web search triggered |
+| 0.3 - 0.7 | Low (< 0.6) | Web search triggered |
+| 0.3 - 0.7 | High (>= 0.6) | Internal knowledge used |
+| >= 0.7 | Any | Internal knowledge used |
+
+**Cross-Lingual Queries (Arabic with V1):**
+
+| Hybrid Score | Result |
+|--------------|--------|
+| < 0.2 | Web search triggered |
+| 0.2 - 0.4 | Check graph confidence |
+| >= 0.4 | Internal knowledge used |
+
+**Frontend Source Indicators:**
+- **Vector ✓**: Chunks retrieved from PostgreSQL
+- **Graph ✓**: Context expanded via Neo4j entities
+- **Web ✓**: External results from SERPAPI
 
 ---
 
@@ -323,9 +328,6 @@ SELECT COUNT(*) FROM chunks;
 
 # View chunks by document
 SELECT doc_id, COUNT(*) as chunks FROM chunks GROUP BY doc_id;
-
-# Check embedding dimensions
-SELECT chunk_id, array_length(embedding, 1) as dim FROM chunks LIMIT 1;
 
 # Exit
 \q
@@ -390,7 +392,6 @@ docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH 
 
 **Solution:**
 - The system automatically adjusts thresholds for cross-lingual retrieval
-- Check logs for: `[QUERY] Cross-lingual retrieval detected - using threshold 0.4`
 - Consider switching to V2 for native multilingual support
 
 ### Issue: "Could not find sufficient information"
@@ -399,22 +400,22 @@ docker exec neo4j-rag cypher-shell -u neo4j -p 'rag-neo4j-password-2024' "MATCH 
 1. Check that documents were ingested successfully
 2. Verify the question relates to ingested content
 3. Check logs for threshold values and similarity scores
-4. For Arabic docs, ensure cross-lingual detection is working
 
-### Issue: Empty Extraction from Scanned PDF
-
-**Solution:**
-1. Ensure Tesseract OCR is installed
-2. Check logs for OCR messages
-3. Vision fallback should trigger automatically
-
-### Issue: V1/V2 Embedding Mismatch
-
-**Symptoms:** "Could not find information" after changing V1/V2 setting
+### Issue: Web Search Not Triggering
 
 **Solution:**
-- V1 and V2 embeddings are in different vector spaces
-- Must clear database and re-ingest after switching models
+1. Check SERPAPI key is configured in `.env`
+2. Verify score is below threshold (< 0.3 for standard queries)
+3. Check logs for `should_web_search` value
+
+### Issue: Docker Container Has Old Code
+
+**Solution:**
+```bash
+docker-compose down
+docker-compose build --no-cache rag-api
+docker-compose up -d
+```
 
 ---
 
@@ -467,13 +468,12 @@ For your assignment demo, show:
 
 ### 3. Cross-Lingual Retrieval (if using Arabic)
 - [ ] Ingest Arabic document
-- [ ] Query in English
+- [ ] Query in English or Arabic
 - [ ] Show Arabic text in citations
-- [ ] Show `is_cross_lingual: true` in decision trace
 
 ### 4. Web Search Fallback
 - [ ] Ask question not in documents
-- [ ] Show web search triggered
+- [ ] Show web search triggered (Web ✓)
 - [ ] Show `provenance: "online"`
 
 ### 5. Special Features

@@ -2045,27 +2045,27 @@ INSTRUCTIONS:
             internal_sufficient = vector_sufficient or graph_sufficient
 
             # Step 3: Web search when internal knowledge is not sufficient
-            # Trigger web search if:
-            # - Vector score < low threshold (clearly not in KB), OR
-            # - Score in middle range AND vector is NOT sufficient (graph entities might be irrelevant)
+            # Thresholds (using effective_low=0.3 and effective_high=0.7 for standard queries):
+            # - Score < 0.3 (effective_low): Definitely need web (no relevant content)
+            # - Score 0.3-0.7: Middle zone - only web if graph confidence is low
+            # - Score >= 0.7 (effective_high): Sufficient - no web search needed
             web_client_available = self.web_search_client is not None
+            
             score_below_low = vector_best_score is not None and vector_best_score < effective_low
             score_in_middle = vector_best_score is not None and effective_low <= vector_best_score < effective_high
+            graph_conf_low = graph_confidence.get("confidence", 0.0) < graph_confidence_threshold
             
-            # Key insight: If vector_sufficient=False and score is mediocre, graph entities 
-            # are likely irrelevant (e.g., query about actor but graph has medical entities)
-            # In this case, trigger web search to get actual relevant information
             should_web_search = (
                 vector_best_score is not None
                 and (
                     score_below_low  # Score < 0.3: definitely need web
-                    or (score_in_middle and not vector_sufficient)  # Score 0.3-0.7 but not sufficient: try web
+                    or (score_in_middle and graph_conf_low)  # Score 0.3-0.7: only if graph confidence is low
                 )
                 and web_client_available
             )
             
-            logger.info(f"[QUERY] Web search check: score={vector_best_score}, low={effective_low}, high={effective_high}")
-            logger.info(f"[QUERY] Web search: below_low={score_below_low}, in_middle={score_in_middle}, vector_sufficient={vector_sufficient}, should_web={should_web_search}")
+            logger.info(f"[QUERY] Web search check: score={vector_best_score:.3f}, low={effective_low}, high={effective_high}")
+            logger.info(f"[QUERY] Web search: below_low={score_below_low}, in_middle={score_in_middle}, graph_conf_low={graph_conf_low}, should_web={should_web_search}")
             
             if should_web_search:
                 response = self.llm_client.chat_completion_raw(
