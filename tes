@@ -17,7 +17,6 @@ from typing import List
 
 import anthropic
 from anthropic import AsyncAnthropicVertex
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +42,6 @@ def _get_model() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pydantic model — single field
-# ---------------------------------------------------------------------------
-
-class CountermeasuresOutput(BaseModel):
-    countermeasures: str = Field(
-        min_length=50,
-        description=(
-            "A single comprehensive document containing: "
-            "1) Countermeasures (CAPA), 2) Pre-submission Checkpoints, "
-            "3) Recommended Response to FDA, 4) Proactive Risk Mitigation."
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
 
@@ -65,7 +49,9 @@ SYSTEM_PROMPT = (
     "You are a senior US FDA regulatory affairs expert with 20+ years of experience "
     "in pharmaceutical quality compliance, CDER submissions, and responding to FDA "
     "deficiency letters (Complete Response Letters, Information Requests, and "
-    "Refuse-to-File communications)."
+    "Refuse-to-File communications). "
+    "You always respond with a well-structured markdown document. "
+    "You never return JSON, code blocks, or any wrapper — only the document content."
 )
 
 ANALYSIS_PROMPT = """
@@ -78,25 +64,25 @@ You are given:
 1. A THEME NAME — representing a cluster of related FDA deficiency observations.
 2. Raw data containing PRODUCT NAMES and their corresponding DEFICIENCY DESCRIPTIONS that belong to this theme. Identify the product names and descriptions from the data yourself.
 
-Your task: Analyze ALL the deficiency descriptions under this theme and produce ONE comprehensive regulatory response document.
+Your task: Analyze ALL the deficiency descriptions under this theme and produce ONE comprehensive COUNTERMEASURES document.
 
-The document MUST contain ALL of the following sections, clearly separated with markdown headers:
+The document MUST contain EXACTLY these 4 sections with these EXACT headings:
 
-## 1. Countermeasures (CAPA)
+## Countermeasures (CAPA)
 - For each identified issue pattern, provide specific corrective and preventive actions.
 - Each countermeasure must be actionable — not vague advice like "improve documentation." Instead: "Revise the stability protocol to include accelerated and long-term conditions per ICH Q1A(R2), with justified time points at 0, 3, 6, 9, 12, 18, 24, and 36 months."
 
-## 2. Pre-Submission Checkpoints
+## Pre-Submission Checkpoints
 - A numbered checklist of items that a regulatory team should verify BEFORE submitting to the FDA to prevent this type of deficiency from recurring.
 - Each checkpoint should be specific and verifiable (yes/no).
 - Example: "Specification limits for each impurity are justified with toxicological data or ICH Q3A/Q3B limits."
 
-## 3. Recommended Response to FDA
+## Recommended Response to FDA
 - A template/framework for how to respond if the FDA has already raised this deficiency.
 - Include: what data to provide, what justifications to include, what commitments to make, and what language to use.
 - The tone should be professional, scientifically rigorous, and compliant.
 
-## 4. Proactive Risk Mitigation
+## Proactive Risk Mitigation
 - What can the organization do going forward to prevent this category of deficiencies across ALL future submissions — not just the current one.
 - Think: SOPs, training, review checklists, process improvements.
 
@@ -106,19 +92,22 @@ RULES:
 3. If a deficiency pattern suggests a systemic issue, call it out explicitly.
 4. Prioritize countermeasures by impact — address the most frequently occurring deficiency patterns first.
 5. The output must be useful for a regulatory affairs professional to directly act on.
-6. Return EVERYTHING as a single string inside the "countermeasures" field.
+6. Output ONLY the markdown document. No JSON, no code fences, no preamble, no summary — just the 4 sections.
 """
 
 CONSOLIDATION_PROMPT = """
 You are given multiple partial countermeasures analyses for the FDA deficiency theme "{theme_name}".
-Each section below was generated from a different subset of deficiency descriptions.
+Each partial result below was generated from a different subset of deficiency descriptions.
 
-Merge them into ONE cohesive, deduplicated final document. Remove redundancy,
-keep the most actionable and specific points, and ensure the final output reads as a
-single unified document with all sections (Countermeasures/CAPA, Checkpoints,
-Recommended Response to FDA, Proactive Risk Mitigation).
+Merge them into ONE cohesive, deduplicated final COUNTERMEASURES document with EXACTLY these 4 sections:
+- ## Countermeasures (CAPA)
+- ## Pre-Submission Checkpoints
+- ## Recommended Response to FDA
+- ## Proactive Risk Mitigation
 
-Return everything in the single "countermeasures" field.
+Remove redundancy, keep the most actionable and specific points, and ensure the final output reads as a single unified document.
+
+Output ONLY the markdown document. No JSON, no code fences, no preamble.
 
 PARTIAL RESULTS:
 
@@ -127,63 +116,14 @@ PARTIAL RESULTS:
 
 
 # ---------------------------------------------------------------------------
-# Safe parse — handles any dict shape Claude might return
-# ---------------------------------------------------------------------------
-
-def _safe_parse(result) -> CountermeasuresOutput:
-    if isinstance(result, dict) and "countermeasures" in result:
-        try:
-            return CountermeasuresOutput.model_validate(result)
-        except Exception:
-            pass
-
-    if isinstance(result, dict):
-        parts = []
-        for k, v in result.items():
-            if isinstance(v, str) and v.strip():
-                header = k.replace("_", " ").title()
-                parts.append(f"## {header}\n{v.strip()}")
-        if parts:
-            joined = "\n\n".join(parts)
-            if len(joined) >= 50:
-                return CountermeasuresOutput(countermeasures=joined)
-
-        longest = ""
-        for v in result.values():
-            if isinstance(v, str) and len(v) > len(longest):
-                longest = v
-        if len(longest) >= 50:
-            return CountermeasuresOutput(countermeasures=longest)
-
-    if isinstance(result, str) and len(result) >= 50:
-        return CountermeasuresOutput(countermeasures=result)
-
-    raw = json.dumps(result, indent=2) if result is not None else ""
-    if len(raw) >= 50:
-        return CountermeasuresOutput(countermeasures=raw)
-
-    raise ValueError(f"Could not extract countermeasures from response: {type(result)}")
-
-
-# ---------------------------------------------------------------------------
-# Core async API call with retries (native async, no threads)
+# Core async API call with retries — returns plain text (no tools)
 # ---------------------------------------------------------------------------
 
 async def _call_claude(
     client: AsyncAnthropicVertex,
     user_prompt: str,
-    tool_name: str = "submit_analysis",
-    temperature: float = 0.2,
     max_tokens: int = 8192,
-) -> CountermeasuresOutput:
-    tools = [
-        {
-            "name": tool_name,
-            "description": "Return the regulatory countermeasures document.",
-            "input_schema": CountermeasuresOutput.model_json_schema(),
-        }
-    ]
-
+) -> str:
     model = _get_model()
 
     for attempt in range(MAX_RETRIES):
@@ -191,11 +131,9 @@ async def _call_claude(
             response = await client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
+                temperature=0,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
-                tools=tools,
-                tool_choice={"type": "tool", "name": tool_name},
             )
         except anthropic.RateLimitError as e:
             logger.warning("Rate limit (429): attempt %d/%d — %s", attempt + 1, MAX_RETRIES, e)
@@ -219,27 +157,14 @@ async def _call_claude(
             await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
             continue
 
-        tool_args = None
-        for block in response.content:
-            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == tool_name:
-                tool_args = getattr(block, "input", None)
-                break
+        text = response.content[0].text.strip()
+        if text:
+            return text
 
-        if tool_args is None:
-            text = "".join(
-                getattr(b, "text", "") for b in response.content
-                if getattr(b, "type", "") == "text"
-            )
-            try:
-                tool_args = json.loads(text)
-            except Exception:
-                logger.warning("No tool_call / no JSON; retrying (%d/%d)", attempt + 1, MAX_RETRIES)
-                if attempt + 1 >= MAX_RETRIES:
-                    raise ValueError("Model did not return usable output after all retries.")
-                await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
-                continue
-
-        return _safe_parse(tool_args)
+        logger.warning("Empty response; retrying (%d/%d)", attempt + 1, MAX_RETRIES)
+        if attempt + 1 >= MAX_RETRIES:
+            raise ValueError("Model returned empty response after all retries.")
+        await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
 
     raise RuntimeError("All retry attempts exhausted")
 
@@ -281,16 +206,16 @@ async def generate_countermeasures(
     chunks = _chunk_text(deficiency_data)
     print(f"Deficiency data: {len(deficiency_data)} chars → {len(chunks)} chunk(s)")
 
-    # ---- Small data: single call, fastest path ----
+    # ---- Small data: single call ----
     if len(chunks) == 1:
         prompt = ANALYSIS_PROMPT.format(theme_name=theme_name, chunk_text=chunks[0])
         t0 = time.time()
-        result = await _call_claude(client, prompt, max_tokens=8192)
+        text = await _call_claude(client, prompt, max_tokens=8192)
         print(f"Done in {time.time()-t0:.1f}s")
-        return result.model_dump()
+        return {"countermeasures": text}
 
-    # ---- Large data: run all chunks concurrently, then consolidate ----
-    async def _analyze_one(idx: int, chunk_text: str) -> CountermeasuresOutput:
+    # ---- Large data: all chunks concurrently, then consolidate ----
+    async def _analyze_one(idx: int, chunk_text: str) -> str:
         prompt = ANALYSIS_PROMPT.format(theme_name=theme_name, chunk_text=chunk_text)
         t0 = time.time()
         res = await _call_claude(client, prompt, max_tokens=4096)
@@ -305,7 +230,7 @@ async def generate_countermeasures(
     )
     print(f"All chunks finished in {time.time()-t_start:.1f}s")
 
-    successes: List[CountermeasuresOutput] = []
+    successes: List[str] = []
     for i, r in enumerate(results):
         if isinstance(r, BaseException):
             logger.error("Chunk %d/%d failed: %s", i + 1, len(results), r)
@@ -322,10 +247,10 @@ async def generate_countermeasures(
         )
 
     if len(successes) == 1:
-        return successes[0].model_dump()
+        return {"countermeasures": successes[0]}
 
-    # ---- Consolidation: merge all chunk outputs into one document ----
-    all_parts = "\n\n---\n\n".join(r.countermeasures for r in successes)
+    # ---- Consolidation ----
+    all_parts = "\n\n---\n\n".join(successes)
     consolidation_prompt = CONSOLIDATION_PROMPT.format(
         theme_name=theme_name, all_parts=all_parts,
     )
@@ -334,12 +259,10 @@ async def generate_countermeasures(
     t_cons = time.time()
     try:
         consolidated = await _call_claude(
-            client, consolidation_prompt,
-            tool_name="submit_consolidated", temperature=0.1,
-            max_tokens=16384,
+            client, consolidation_prompt, max_tokens=16384,
         )
         print(f"Consolidation done in {time.time()-t_cons:.1f}s")
-        return consolidated.model_dump()
+        return {"countermeasures": consolidated}
     except Exception as e:
         logger.warning("Consolidation failed (%s); returning concatenated results", e)
         return {"countermeasures": all_parts}
