@@ -38,7 +38,7 @@ def _build_async_client() -> AsyncAnthropicVertex:
 
 
 def _get_model() -> str:
-    return os.getenv("ANTHROPIC_MODEL", "claude-opus-4@20250514")
+    return os.getenv("COUNTERMEASURE_MODEL", os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4@20250514"))
 
 
 # ---------------------------------------------------------------------------
@@ -249,20 +249,43 @@ async def generate_countermeasures(
     if len(successes) == 1:
         return {"countermeasures": successes[0]}
 
-    # ---- Consolidation ----
-    all_parts = "\n\n---\n\n".join(successes)
-    consolidation_prompt = CONSOLIDATION_PROMPT.format(
-        theme_name=theme_name, all_parts=all_parts,
-    )
+    # ---- Tree-based consolidation: merge in groups, then merge the merges ----
+    MERGE_GROUP_SIZE = 4
+    current_level = successes
+    level = 1
 
-    print("Consolidating chunk results into final document...")
-    t_cons = time.time()
-    try:
-        consolidated = await _call_claude(
-            client, consolidation_prompt, max_tokens=16384,
+    while len(current_level) > 1:
+        groups = [
+            current_level[i : i + MERGE_GROUP_SIZE]
+            for i in range(0, len(current_level), MERGE_GROUP_SIZE)
+        ]
+        print(f"Consolidation level {level}: {len(current_level)} inputs → {len(groups)} group(s) (up to {MERGE_GROUP_SIZE} each)")
+
+        async def _merge_group(group: List[str]) -> str:
+            if len(group) == 1:
+                return group[0]
+            all_parts = "\n\n---\n\n".join(group)
+            prompt = CONSOLIDATION_PROMPT.format(
+                theme_name=theme_name, all_parts=all_parts,
+            )
+            return await _call_claude(client, prompt, max_tokens=8192)
+
+        t_level = time.time()
+        merge_results = await asyncio.gather(
+            *[_merge_group(g) for g in groups],
+            return_exceptions=True,
         )
-        print(f"Consolidation done in {time.time()-t_cons:.1f}s")
-        return {"countermeasures": consolidated}
-    except Exception as e:
-        logger.warning("Consolidation failed (%s); returning concatenated results", e)
-        return {"countermeasures": all_parts}
+
+        next_level: List[str] = []
+        for i, r in enumerate(merge_results):
+            if isinstance(r, BaseException):
+                logger.error("Merge group %d failed: %s", i + 1, r)
+                next_level.append("\n\n---\n\n".join(groups[i]))
+            else:
+                next_level.append(r)
+
+        print(f"  Level {level} done in {time.time()-t_level:.1f}s → {len(next_level)} output(s)")
+        current_level = next_level
+        level += 1
+
+    return {"countermeasures": current_level[0]}
