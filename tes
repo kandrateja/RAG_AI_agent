@@ -39,7 +39,7 @@ def _build_async_client() -> AsyncAnthropicVertex:
 
 
 def _get_model() -> str:
-    return os.getenv("ANTHROPIC_MODEL", "")
+    return os.getenv("ANTHROPIC_MODEL", "claude-opus-4@20250514")
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +51,8 @@ class CountermeasuresOutput(BaseModel):
         min_length=50,
         description=(
             "A single comprehensive document containing: "
-            "1) Theme Summary, 2) Common Root Causes, "
-            "3) Countermeasures (CAPA), 4) Pre-submission Checkpoints, "
-            "5) Recommended Response to FDA, 6) Proactive Risk Mitigation."
+            "1) Countermeasures (CAPA), 2) Pre-submission Checkpoints, "
+            "3) Recommended Response to FDA, 4) Proactive Risk Mitigation."
         ),
     )
 
@@ -83,28 +82,21 @@ Your task: Analyze ALL the deficiency descriptions under this theme and produce 
 
 The document MUST contain ALL of the following sections, clearly separated with markdown headers:
 
-## 1. Theme Summary
-- A 2-3 sentence summary of what this theme covers and why it matters to FDA reviewers.
-
-## 2. Common Root Causes
-- List the top 3-5 root causes that typically lead to these deficiencies.
-- For each root cause, explain WHY the FDA considers it a deficiency.
-
-## 3. Countermeasures (CAPA)
-- For each root cause, provide specific corrective and preventive actions.
+## 1. Countermeasures (CAPA)
+- For each identified issue pattern, provide specific corrective and preventive actions.
 - Each countermeasure must be actionable — not vague advice like "improve documentation." Instead: "Revise the stability protocol to include accelerated and long-term conditions per ICH Q1A(R2), with justified time points at 0, 3, 6, 9, 12, 18, 24, and 36 months."
 
-## 4. Pre-Submission Checkpoints
+## 2. Pre-Submission Checkpoints
 - A numbered checklist of items that a regulatory team should verify BEFORE submitting to the FDA to prevent this type of deficiency from recurring.
 - Each checkpoint should be specific and verifiable (yes/no).
 - Example: "Specification limits for each impurity are justified with toxicological data or ICH Q3A/Q3B limits."
 
-## 5. Recommended Response to FDA
+## 3. Recommended Response to FDA
 - A template/framework for how to respond if the FDA has already raised this deficiency.
 - Include: what data to provide, what justifications to include, what commitments to make, and what language to use.
 - The tone should be professional, scientifically rigorous, and compliant.
 
-## 6. Proactive Risk Mitigation
+## 4. Proactive Risk Mitigation
 - What can the organization do going forward to prevent this category of deficiencies across ALL future submissions — not just the current one.
 - Think: SOPs, training, review checklists, process improvements.
 
@@ -123,8 +115,8 @@ Each section below was generated from a different subset of deficiency descripti
 
 Merge them into ONE cohesive, deduplicated final document. Remove redundancy,
 keep the most actionable and specific points, and ensure the final output reads as a
-single unified document with all sections (Theme Summary, Common Root Causes,
-Countermeasures/CAPA, Checkpoints, Recommended Response to FDA, Proactive Risk Mitigation).
+single unified document with all sections (Countermeasures/CAPA, Checkpoints,
+Recommended Response to FDA, Proactive Risk Mitigation).
 
 Return everything in the single "countermeasures" field.
 
