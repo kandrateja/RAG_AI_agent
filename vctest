@@ -1,0 +1,66 @@
+"""
+Live test for the countermeasures module.
+
+Usage:
+  python test_countermeasures.py
+"""
+
+import asyncio
+import json
+import time
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from countermeasures import generate_countermeasures
+
+
+SAMPLE_THEME = "Dissolution Testing Related Queries"
+
+SAMPLE_DEFICIENCY_DATA = (
+    "The deficiency description for Product Name Metformin HCl Tablets 500mg is: "
+    "The dissolution method for the proposed drug product has not been adequately validated. "
+    "Please provide complete method validation data including specificity, linearity, accuracy, "
+    "precision, and robustness for the dissolution test method.\n"
+    "The deficiency description for Product Name Amlodipine Besylate Tablets 5mg is: "
+    "The dissolution profile comparison using the f2 similarity factor is not acceptable because "
+    "the coefficient of variation at the earlier time points exceeds 20%. Please provide "
+    "additional dissolution data with tighter variability or an alternative statistical approach.\n"
+    "The deficiency description for Product Name Omeprazole DR Capsules 20mg is: "
+    "The applicant has not provided dissolution data in multiple media (pH 1.2, 4.5, 6.8) "
+    "as recommended by the FDA guidance. Please submit dissolution profiles in at least three "
+    "media to demonstrate pH-independent release.\n"
+    "The deficiency description for Product Name Losartan Potassium Tablets 50mg is: "
+    "Your proposed dissolution specification of Q=75% in 45 minutes is not sufficiently "
+    "discriminating. Please tighten the specification or provide justification that the current "
+    "specification can distinguish between acceptable and unacceptable batches."
+)
+
+
+async def main():
+    print(f"Theme: {SAMPLE_THEME}")
+    print(f"Deficiency data: {len(SAMPLE_DEFICIENCY_DATA)} chars")
+    print("-" * 60)
+
+    start = time.time()
+    result = await generate_countermeasures(
+        theme_name=SAMPLE_THEME,
+        deficiency_data=SAMPLE_DEFICIENCY_DATA,
+    )
+    elapsed = time.time() - start
+
+    print("\n" + "=" * 60)
+    print("COUNTERMEASURES DOCUMENT")
+    print("=" * 60)
+    print(result["countermeasures"])
+    print(f"\nTime: {elapsed:.1f}s")
+    print(f"Length: {len(result['countermeasures'])} chars")
+
+    with open("countermeasures_test_output.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    print("Output saved to countermeasures_test_output.json")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
