@@ -1,0 +1,353 @@
+"""
+Countermeasures & Regulatory Response Generator.
+Given a theme name and its deficiency descriptions (with product names),
+generates a comprehensive countermeasures document using Claude on Vertex AI.
+
+Small data  → single API call.
+Large data  → split into chunks, analyze all chunks concurrently, then consolidate.
+"""
+
+import asyncio
+import json
+import logging
+import math
+import os
+import time
+from typing import List
+
+import anthropic
+from anthropic import AsyncAnthropicVertex
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 5
+BACKOFF_BASE = 2.0
+MAX_CHARS_PER_CHUNK = int(os.getenv("COUNTERMEASURE_CHUNK_SIZE", "15000"))
+
+
+# ---------------------------------------------------------------------------
+# Async client — matches llm_service.py (the working main pipeline)
+# ---------------------------------------------------------------------------
+
+def _build_async_client() -> AsyncAnthropicVertex:
+    region = os.getenv("VERTEX_REGION", "us-east5")
+    project_id = os.getenv("VERTEX_PROJECT_ID")
+    if not project_id:
+        raise ValueError("VERTEX_PROJECT_ID must be set in .env")
+    return AsyncAnthropicVertex(region=region, project_id=project_id)
+
+
+def _get_model() -> str:
+    return os.getenv("ANTHROPIC_MODEL", "")
+
+
+# ---------------------------------------------------------------------------
+# Pydantic model — single field
+# ---------------------------------------------------------------------------
+
+class CountermeasuresOutput(BaseModel):
+    countermeasures: str = Field(
+        min_length=50,
+        description=(
+            "A single comprehensive document containing: "
+            "1) Theme Summary, 2) Common Root Causes, "
+            "3) Countermeasures (CAPA), 4) Pre-submission Checkpoints, "
+            "5) Recommended Response to FDA, 6) Proactive Risk Mitigation."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = (
+    "You are a senior US FDA regulatory affairs expert with 20+ years of experience "
+    "in pharmaceutical quality compliance, CDER submissions, and responding to FDA "
+    "deficiency letters (Complete Response Letters, Information Requests, and "
+    "Refuse-to-File communications)."
+)
+
+ANALYSIS_PROMPT = """
+Input:
+  Theme Name: {theme_name}
+  Deficiency Data (product names and deficiency descriptions):
+{chunk_text}
+
+You are given:
+1. A THEME NAME — representing a cluster of related FDA deficiency observations.
+2. Raw data containing PRODUCT NAMES and their corresponding DEFICIENCY DESCRIPTIONS that belong to this theme. Identify the product names and descriptions from the data yourself.
+
+Your task: Analyze ALL the deficiency descriptions under this theme and produce ONE comprehensive regulatory response document.
+
+The document MUST contain ALL of the following sections, clearly separated with markdown headers:
+
+## 1. Theme Summary
+- A 2-3 sentence summary of what this theme covers and why it matters to FDA reviewers.
+
+## 2. Common Root Causes
+- List the top 3-5 root causes that typically lead to these deficiencies.
+- For each root cause, explain WHY the FDA considers it a deficiency.
+
+## 3. Countermeasures (CAPA)
+- For each root cause, provide specific corrective and preventive actions.
+- Each countermeasure must be actionable — not vague advice like "improve documentation." Instead: "Revise the stability protocol to include accelerated and long-term conditions per ICH Q1A(R2), with justified time points at 0, 3, 6, 9, 12, 18, 24, and 36 months."
+
+## 4. Pre-Submission Checkpoints
+- A numbered checklist of items that a regulatory team should verify BEFORE submitting to the FDA to prevent this type of deficiency from recurring.
+- Each checkpoint should be specific and verifiable (yes/no).
+- Example: "Specification limits for each impurity are justified with toxicological data or ICH Q3A/Q3B limits."
+
+## 5. Recommended Response to FDA
+- A template/framework for how to respond if the FDA has already raised this deficiency.
+- Include: what data to provide, what justifications to include, what commitments to make, and what language to use.
+- The tone should be professional, scientifically rigorous, and compliant.
+
+## 6. Proactive Risk Mitigation
+- What can the organization do going forward to prevent this category of deficiencies across ALL future submissions — not just the current one.
+- Think: SOPs, training, review checklists, process improvements.
+
+RULES:
+1. Be specific to the actual deficiency descriptions provided — do not give generic advice.
+2. Cite relevant FDA guidances, ICH guidelines (Q1A, Q1B, Q2, Q3A, Q3B, Q6A, Q8, Q9, Q10, Q11, etc.), and 21 CFR sections where applicable.
+3. If a deficiency pattern suggests a systemic issue, call it out explicitly.
+4. Prioritize countermeasures by impact — address the most frequently occurring deficiency patterns first.
+5. The output must be useful for a regulatory affairs professional to directly act on.
+6. Return EVERYTHING as a single string inside the "countermeasures" field.
+"""
+
+CONSOLIDATION_PROMPT = """
+You are given multiple partial countermeasures analyses for the FDA deficiency theme "{theme_name}".
+Each section below was generated from a different subset of deficiency descriptions.
+
+Merge them into ONE cohesive, deduplicated final document. Remove redundancy,
+keep the most actionable and specific points, and ensure the final output reads as a
+single unified document with all sections (Theme Summary, Common Root Causes,
+Countermeasures/CAPA, Checkpoints, Recommended Response to FDA, Proactive Risk Mitigation).
+
+Return everything in the single "countermeasures" field.
+
+PARTIAL RESULTS:
+
+{all_parts}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Safe parse — handles any dict shape Claude might return
+# ---------------------------------------------------------------------------
+
+def _safe_parse(result) -> CountermeasuresOutput:
+    if isinstance(result, dict) and "countermeasures" in result:
+        try:
+            return CountermeasuresOutput.model_validate(result)
+        except Exception:
+            pass
+
+    if isinstance(result, dict):
+        parts = []
+        for k, v in result.items():
+            if isinstance(v, str) and v.strip():
+                header = k.replace("_", " ").title()
+                parts.append(f"## {header}\n{v.strip()}")
+        if parts:
+            joined = "\n\n".join(parts)
+            if len(joined) >= 50:
+                return CountermeasuresOutput(countermeasures=joined)
+
+        longest = ""
+        for v in result.values():
+            if isinstance(v, str) and len(v) > len(longest):
+                longest = v
+        if len(longest) >= 50:
+            return CountermeasuresOutput(countermeasures=longest)
+
+    if isinstance(result, str) and len(result) >= 50:
+        return CountermeasuresOutput(countermeasures=result)
+
+    raw = json.dumps(result, indent=2) if result is not None else ""
+    if len(raw) >= 50:
+        return CountermeasuresOutput(countermeasures=raw)
+
+    raise ValueError(f"Could not extract countermeasures from response: {type(result)}")
+
+
+# ---------------------------------------------------------------------------
+# Core async API call with retries (native async, no threads)
+# ---------------------------------------------------------------------------
+
+async def _call_claude(
+    client: AsyncAnthropicVertex,
+    user_prompt: str,
+    tool_name: str = "submit_analysis",
+    temperature: float = 0.2,
+    max_tokens: int = 8192,
+) -> CountermeasuresOutput:
+    tools = [
+        {
+            "name": tool_name,
+            "description": "Return the regulatory countermeasures document.",
+            "input_schema": CountermeasuresOutput.model_json_schema(),
+        }
+    ]
+
+    model = _get_model()
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+                tools=tools,
+                tool_choice={"type": "tool", "name": tool_name},
+            )
+        except anthropic.RateLimitError as e:
+            logger.warning("Rate limit (429): attempt %d/%d — %s", attempt + 1, MAX_RETRIES, e)
+            if attempt + 1 >= MAX_RETRIES:
+                raise
+            await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
+            continue
+        except anthropic.APIStatusError as e:
+            status = getattr(e, "status_code", None)
+            if status and 500 <= status < 600:
+                logger.warning("Server error %s: attempt %d/%d", status, attempt + 1, MAX_RETRIES)
+                if attempt + 1 >= MAX_RETRIES:
+                    raise
+                await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
+                continue
+            raise
+        except anthropic.APITimeoutError as e:
+            logger.warning("Timeout: attempt %d/%d — %s", attempt + 1, MAX_RETRIES, e)
+            if attempt + 1 >= MAX_RETRIES:
+                raise
+            await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
+            continue
+
+        tool_args = None
+        for block in response.content:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == tool_name:
+                tool_args = getattr(block, "input", None)
+                break
+
+        if tool_args is None:
+            text = "".join(
+                getattr(b, "text", "") for b in response.content
+                if getattr(b, "type", "") == "text"
+            )
+            try:
+                tool_args = json.loads(text)
+            except Exception:
+                logger.warning("No tool_call / no JSON; retrying (%d/%d)", attempt + 1, MAX_RETRIES)
+                if attempt + 1 >= MAX_RETRIES:
+                    raise ValueError("Model did not return usable output after all retries.")
+                await asyncio.sleep(BACKOFF_BASE ** (attempt + 1))
+                continue
+
+        return _safe_parse(tool_args)
+
+    raise RuntimeError("All retry attempts exhausted")
+
+
+# ---------------------------------------------------------------------------
+# Chunking — only when data exceeds the per-chunk limit
+# ---------------------------------------------------------------------------
+
+def _chunk_text(text: str) -> List[str]:
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= MAX_CHARS_PER_CHUNK:
+        return [text]
+
+    num_chunks = math.ceil(len(text) / MAX_CHARS_PER_CHUNK)
+    lines = text.split("\n")
+    lines_per_chunk = max(1, math.ceil(len(lines) / num_chunks))
+
+    chunks = []
+    for i in range(0, len(lines), lines_per_chunk):
+        chunk = "\n".join(lines[i : i + lines_per_chunk]).strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+async def generate_countermeasures(
+    theme_name: str, deficiency_data: str
+) -> dict:
+    if not deficiency_data.strip():
+        raise ValueError("deficiency_data is empty")
+
+    client = _build_async_client()
+    chunks = _chunk_text(deficiency_data)
+    print(f"Deficiency data: {len(deficiency_data)} chars → {len(chunks)} chunk(s)")
+
+    # ---- Small data: single call, fastest path ----
+    if len(chunks) == 1:
+        prompt = ANALYSIS_PROMPT.format(theme_name=theme_name, chunk_text=chunks[0])
+        t0 = time.time()
+        result = await _call_claude(client, prompt, max_tokens=8192)
+        print(f"Done in {time.time()-t0:.1f}s")
+        return result.model_dump()
+
+    # ---- Large data: run all chunks concurrently, then consolidate ----
+    async def _analyze_one(idx: int, chunk_text: str) -> CountermeasuresOutput:
+        prompt = ANALYSIS_PROMPT.format(theme_name=theme_name, chunk_text=chunk_text)
+        t0 = time.time()
+        res = await _call_claude(client, prompt, max_tokens=4096)
+        print(f"  Chunk {idx+1}/{len(chunks)} done in {time.time()-t0:.1f}s")
+        return res
+
+    print(f"Running {len(chunks)} chunks concurrently...")
+    t_start = time.time()
+    results = await asyncio.gather(
+        *[_analyze_one(i, c) for i, c in enumerate(chunks)],
+        return_exceptions=True,
+    )
+    print(f"All chunks finished in {time.time()-t_start:.1f}s")
+
+    successes: List[CountermeasuresOutput] = []
+    for i, r in enumerate(results):
+        if isinstance(r, BaseException):
+            logger.error("Chunk %d/%d failed: %s", i + 1, len(results), r)
+        else:
+            successes.append(r)
+
+    if not successes:
+        raise RuntimeError(f"All {len(chunks)} chunk(s) failed. Check logs for details.")
+
+    if len(successes) < len(results):
+        logger.warning(
+            "%d/%d chunks succeeded; consolidating partial results",
+            len(successes), len(results),
+        )
+
+    if len(successes) == 1:
+        return successes[0].model_dump()
+
+    # ---- Consolidation: merge all chunk outputs into one document ----
+    all_parts = "\n\n---\n\n".join(r.countermeasures for r in successes)
+    consolidation_prompt = CONSOLIDATION_PROMPT.format(
+        theme_name=theme_name, all_parts=all_parts,
+    )
+
+    print("Consolidating chunk results into final document...")
+    t_cons = time.time()
+    try:
+        consolidated = await _call_claude(
+            client, consolidation_prompt,
+            tool_name="submit_consolidated", temperature=0.1,
+            max_tokens=16384,
+        )
+        print(f"Consolidation done in {time.time()-t_cons:.1f}s")
+        return consolidated.model_dump()
+    except Exception as e:
+        logger.warning("Consolidation failed (%s); returning concatenated results", e)
+        return {"countermeasures": all_parts}
